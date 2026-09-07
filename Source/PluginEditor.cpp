@@ -239,6 +239,9 @@ void VoxeraAudioProcessorEditor::timerCallback()
     outPeak = juce::jmax(processor.meters.peakDb.load(), outPeak - 1.3f);
     const bool running = processor.capturing.load();
     analyze.setEnabled(!running);
+    // The full reasoning does not fit on the panel, so it lives here.
+    if (const auto& report = processor.autoMixReport(); report.isNotEmpty())
+        autoMix.setTooltip(report);
     analyze.setButtonText(running ? "ANALYZING " + juce::String(static_cast<int>(processor.captureProgress.load() * 100.0f)) + "%" : "ANALYZE VOICE");
     repaint();
 }
@@ -279,23 +282,36 @@ void VoxeraAudioProcessorEditor::drawMeter(juce::Graphics& g, juce::Rectangle<fl
     }
     g.setColour(pink); g.drawText(juce::String(db, 1) + " dBFS", r.withTrimmedTop(18).toNearestInt(), juce::Justification::left);
 }
+/*  One stage's activity on a single line: name, bar, figure.
+
+    Laid out horizontally rather than stacked because the only band of the panel
+    that is free on every page — between the tab row and the logo — is barely
+    thirty pixels tall, and a stacked meter does not fit there without landing on
+    top of the tabs.
+*/
 void VoxeraAudioProcessorEditor::drawWorking(juce::Graphics& g, juce::Rectangle<float> r,
                                              const juce::String& label, float db, float fullScaleDb)
 {
-    g.setFont(font(9.0f, true));
-    g.setColour(pink.withAlpha(0.75f));
-    g.drawText(label, r.removeFromTop(12).toNearestInt(), juce::Justification::centred);
+    auto name = r.removeFromLeft(44.0f);
+    auto value = r.removeFromRight(38.0f);
+    auto bar = r.reduced(4.0f, 0.0f);
+
+    g.setFont(font(8.5f, true));
+    g.setColour(pink.withAlpha(0.6f));
+    g.drawText(label, name.toNearestInt(), juce::Justification::centredLeft);
 
     const float filled = juce::jlimit(0.0f, 1.0f, std::abs(db) / fullScaleDb);
+    const float y = bar.getCentreY() - 2.5f;
     g.setColour(pink.withAlpha(0.13f));
-    g.fillRoundedRectangle(r.getX(), r.getY(), r.getWidth(), 7.0f, 3.0f);
+    g.fillRoundedRectangle(bar.getX(), y, bar.getWidth(), 5.0f, 2.5f);
     if (filled > 0.005f) {
         g.setColour(pink.withAlpha(0.85f));
-        g.fillRoundedRectangle(r.getX(), r.getY(), r.getWidth() * filled, 7.0f, 3.0f);
+        g.fillRoundedRectangle(bar.getX(), y, bar.getWidth() * filled, 5.0f, 2.5f);
     }
-    g.setFont(font(9.0f));
+
+    g.setFont(font(8.5f));
     g.setColour(juce::Colour(0xfff6c0e4));
-    g.drawText(juce::String(db, 1), r.withTrimmedTop(9).toNearestInt(), juce::Justification::centred);
+    g.drawText(juce::String(db, 1), value.toNearestInt(), juce::Justification::centredRight);
 }
 void VoxeraAudioProcessorEditor::drawMascot(juce::Graphics& g, juce::Rectangle<float> r)
 {
@@ -333,17 +349,24 @@ void VoxeraAudioProcessorEditor::paint(juce::Graphics& g)
     drawMeter(g, {95, 103, 130, 62}, inPeak, "IN");
     drawMeter(g, {1000, 103, 130, 62}, outPeak, "OUT");
 
-    /*  Ten stages now act on the signal, most of them deciding for themselves
-        how hard to work. Without this row the only way to tell which one is
-        responsible for a sound is to bypass them one at a time.
+    /*  Ten stages now act on the signal, most deciding for themselves how hard
+        to work. Without this row the only way to tell which one is responsible
+        for a sound is to bypass them one at a time.
+
+        The strip sits between the tab row, which ends at y=117, and the logo,
+        which starts at y=153; and between the IN and OUT meters, which own the
+        panel out to x=225 and from x=1000. Everything here has to stay inside
+        those bounds or it lands on top of something.
     */
     {
-        const float x0 = 268.0f, w = 108.0f, gap = 18.0f;
-        drawWorking(g, {x0,                     108, w, 34}, "GATE",    processor.gateReductionDb(), 40.0f);
-        drawWorking(g, {x0 + (w + gap),         108, w, 34}, "OPTICAL", -processor.opticalReductionDb(), 12.0f);
-        drawWorking(g, {x0 + 2 * (w + gap),     108, w, 34}, "DENSITY", processor.densityLiftDb(), 12.0f);
-        drawWorking(g, {x0 + 3 * (w + gap),     108, w, 34}, "LIMIT",   processor.limiterReductionDb(), 6.0f);
-        drawWorking(g, {x0 + 4 * (w + gap),     108, w, 34}, "LOCK Hz", processor.lockMudHz(), 700.0f);
+        // Cells are narrower than their spacing, so each figure has clear air
+        // before the next label rather than running straight into it.
+        const float x0 = 242.0f, w = 140.0f, pitch = 152.0f, y = 124.0f, h = 18.0f;
+        drawWorking(g, {x0,                 y, w, h}, "GATE",    processor.gateReductionDb(), 40.0f);
+        drawWorking(g, {x0 + pitch,         y, w, h}, "OPT",     -processor.opticalReductionDb(), 12.0f);
+        drawWorking(g, {x0 + 2.0f * pitch,  y, w, h}, "DENS",    processor.densityLiftDb(), 12.0f);
+        drawWorking(g, {x0 + 3.0f * pitch,  y, w, h}, "LIMIT",   processor.limiterReductionDb(), 6.0f);
+        drawWorking(g, {x0 + 4.0f * pitch,  y, w, h}, "LOCK Hz", processor.lockMudHz(), 700.0f);
     }
     if (activePage != 4) {
     const juce::String logo("VOXERA");
@@ -396,20 +419,25 @@ void VoxeraAudioProcessorEditor::paint(juce::Graphics& g)
         g.setColour(pink.withAlpha(0.8f)); g.setFont(font(11));
         g.drawText(processor.profileReady.load() ? "PROFILE READY" : "Sing for 8s, then raise Auto Voice", 308, 445, 290, 28, juce::Justification::left);
 
-        /*  Auto Mix moves twenty controls at once. Printing what it concluded,
-            in the same words a mixer would use, is what lets the singer
-            disagree with it rather than guess which knob to undo.
+        /*  Auto Mix moves twenty controls at once. Saying what it concluded, in
+            the same words a mixer would use, is what lets the singer disagree
+            with it rather than guess which knob to undo.
+
+            Only the lines that fit are drawn here. The band below the knobs and
+            above the divider is all the free space this page has, so the full
+            reasoning lives in the button's tooltip instead of being crammed in.
         */
         const auto& report = processor.autoMixReport();
         if (report.isNotEmpty()) {
             g.setColour(pink.withAlpha(0.10f));
-            g.fillRoundedRectangle(612, 436, 496, 104, 6);
+            g.fillRoundedRectangle(310, 494, 780, 50, 5);
             g.setFont(font(9.0f));
             g.setColour(juce::Colour(0xfff6c0e4));
             juce::StringArray lines;
             lines.addLines(report);
-            for (int i = 0; i < juce::jmin(9, lines.size()); ++i)
-                g.drawText(lines[i], 622, 440 + i * 11, 480, 11, juce::Justification::left);
+            lines.removeEmptyStrings();
+            for (int i = 0; i < juce::jmin(4, lines.size()); ++i)
+                g.drawText(lines[i].trim(), 320, 497 + i * 11, 760, 11, juce::Justification::left);
         }
     }
     g.setColour(ink.withAlpha(0.45f)); g.drawHorizontalLine(548, 24, 1176);
