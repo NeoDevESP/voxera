@@ -5,3 +5,4 @@ dist/
 *.user
 *.suo
 .DS_Store
+build-insp/

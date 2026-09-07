@@ -48,6 +48,24 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(RTNeural)
 
+# Component inspector, for development only. Two layout faults in this project
+# were found by rendering the editor to a PNG and looking at it; this shows the
+# same information live. It is off by default and must never enter a release
+# binary, which is what the option is for rather than a comment asking nicely.
+option(VOXERA_UI_INSPECTOR "Build with the Melatonin component inspector" OFF)
+if(VOXERA_UI_INSPECTOR)
+    # SOURCE_DIR is set explicitly because juce_add_module requires the folder
+    # to carry the module's own name, and FetchContent would otherwise check it
+    # out as "melatonin_inspector-src" and fail during configure.
+    FetchContent_Declare(
+        melatonin_inspector
+        GIT_REPOSITORY https://github.com/sudara/melatonin_inspector.git
+        GIT_TAG main
+        SOURCE_DIR ${CMAKE_BINARY_DIR}/melatonin_inspector
+    )
+    FetchContent_MakeAvailable(melatonin_inspector)
+endif()
+
 juce_add_plugin(VOXERA
     COMPANY_NAME "Trevor Deey Labs"
     # The unique id a host uses is derived from these codes, so every build that
@@ -119,6 +137,7 @@ target_compile_definitions(VOXERA
         JUCE_VST3_CAN_REPLACE_VST2=0
         RUBBERBAND_STATIC=1
         NOMINMAX   # prevent Windows min/max macros from breaking std::min/std::max in RubberBand
+        VOXERA_WITH_INSPECTOR=$<BOOL:${VOXERA_UI_INSPECTOR}>
 )
 
 if(APPLE)
@@ -138,6 +157,7 @@ target_link_libraries(VOXERA
         # test targets include NeuralStage.h through PluginProcessor.h, so they
         # link RTNeural themselves rather than inheriting it from here.
         RTNeural
+        $<$<BOOL:${VOXERA_UI_INSPECTOR}>:melatonin_inspector>
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags

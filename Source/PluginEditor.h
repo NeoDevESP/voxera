@@ -1,6 +1,16 @@
 #pragma once
 #include "PluginProcessor.h"
 
+/*  Development-only component inspector.
+
+    Guarded rather than merely unused: the point of the CMake option is that the
+    module is not compiled into a release binary at all, so this header must not
+    assume it exists.
+*/
+#if VOXERA_WITH_INSPECTOR
+ #include <melatonin_inspector/melatonin_inspector.h>
+#endif
+
 class VoxeraLookAndFeel : public juce::LookAndFeel_V4
 {
 public:
@@ -58,5 +68,11 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
     int activePage = 0;
     float inPeak = -120.0f, outPeak = -120.0f;
+#if VOXERA_WITH_INSPECTOR
+    // Opened with the I key. Holds a reference to this editor, so it has to be
+    // declared last and destroyed first.
+    std::unique_ptr<melatonin::Inspector> inspector;
+    bool keyPressed(const juce::KeyPress&) override;
+#endif
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VoxeraAudioProcessorEditor)
 };

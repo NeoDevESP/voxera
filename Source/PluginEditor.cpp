@@ -293,6 +293,17 @@ void VoxeraAudioProcessorEditor::timerCallback()
     analyze.setButtonText(running ? "ANALYZING " + juce::String(static_cast<int>(processor.captureProgress.load() * 100.0f)) + "%" : "ANALYZE VOICE");
     repaint();
 }
+#if VOXERA_WITH_INSPECTOR
+bool VoxeraAudioProcessorEditor::keyPressed(const juce::KeyPress& key)
+{
+    if (!key.isKeyCode('I') && !key.isKeyCode('i')) return false;
+    if (inspector == nullptr) inspector = std::make_unique<melatonin::Inspector>(*this);
+    inspector->setVisible(true);
+    inspector->toggle(true);
+    return true;
+}
+#endif
+
 void VoxeraAudioProcessorEditor::chooseNeuralModel()
 {
     // Clicking with a capture already loaded removes it, so there is a way back
