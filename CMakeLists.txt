@@ -98,6 +98,14 @@ target_compile_definitions(VOXERA
         NOMINMAX   # prevent Windows min/max macros from breaking std::min/std::max in RubberBand
 )
 
+if(APPLE)
+    # Rubber Band's single translation unit defines HAVE_VDSP on Apple platforms
+    # and uses Accelerate's FFT there, while every other platform gets its
+    # built-in one. So this dependency exists only on macOS, and its absence is
+    # invisible until a link actually happens there.
+    target_link_libraries(VOXERA PUBLIC "-framework Accelerate")
+endif()
+
 target_link_libraries(VOXERA
     PRIVATE
         juce::juce_audio_utils
