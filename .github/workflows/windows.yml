@@ -1,0 +1,38 @@
+name: Windows x64 build, validation and installer
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe -OutFile "$env:RUNNER_TEMP/innosetup.exe"
+          $signature = Get-AuthenticodeSignature "$env:RUNNER_TEMP/innosetup.exe"
+          if ($signature.Status -ne 'Valid') { throw 'Inno Setup signature is not valid' }
+          $setup = Start-Process "$env:RUNNER_TEMP/innosetup.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "Inno Setup installation failed: $($setup.ExitCode)" }
+      - name: Build, test, validate and package
+        shell: pwsh
+        run: ./BUILD_WINDOWS.ps1 -Package
+      - name: Upload installer and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: VOXERA-0.8.0-Windows-x64-Installer
+          if-no-files-found: error
+          path: dist/
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VOXERA-Windows-test-evidence
+          path: |
+            build/Testing/Temporary/
+            build/test-previews/

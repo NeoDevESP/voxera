@@ -1,0 +1,7 @@
+CMake 4.4.3 configuration/generation: PASS
+VOXERA_VST3 Release (Linux x86_64): BUILT
+VOXERA_AlgorithmTests Release: BUILT
+VOXERA_RealtimeTests Release: BUILT
+CTest pitch_control: PASS
+CTest realtime_utilities: PASS
+Windows build/workflow: NOT RUN

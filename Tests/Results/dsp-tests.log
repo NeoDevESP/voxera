@@ -1,0 +1,31 @@
+Compiled juce_core.cpp
+Compiled juce_audio_basics.cpp
+Compiled juce_dsp.cpp
+Compiled juce_audio_formats.cpp
+Compiled juce_core_CompilationTime.cpp
+Compiled RubberBandSingle.cpp
+Compiled dsp_tests.cpp
+Smart EQ 44100 Hz: 1 kHz attenuation -0.863615 dB, shared budget 0.863811 dB
+Smart EQ 48000 Hz: 1 kHz attenuation -0.859096 dB, shared budget 0.859334 dB
+Smart EQ 96000 Hz: 1 kHz attenuation -0.844314 dB, shared budget 0.844953 dB
+PASS: Smart EQ budget, attenuation, default identity, silence recovery, stereo polarity, block partitioning
+Spectral partition max difference: 0
+Half-note delay at 40 BPM: 144000 samples
+PASS: module bypass fades, spectral partitioning, tempo delay
+YIN 44100Hz / 80Hz error 0.0398307 cents
+YIN 44100Hz / 110Hz error 0.0817242 cents
+YIN 44100Hz / 220Hz error 0.352047 cents
+YIN 44100Hz / 440Hz error 1.29578 cents
+YIN 44100Hz / 880Hz error 1.46096 cents
+YIN 48000Hz / 80Hz error 0.0383861 cents
+YIN 48000Hz / 110Hz error 0.0786287 cents
+YIN 48000Hz / 220Hz error 0.0959637 cents
+YIN 48000Hz / 440Hz error 1.04788 cents
+YIN 48000Hz / 880Hz error 2.04731 cents
+YIN 96000Hz / 80Hz error 0.0383861 cents
+YIN 96000Hz / 110Hz error 0.0786287 cents
+YIN 96000Hz / 220Hz error 0.0959637 cents
+YIN 96000Hz / 440Hz error 1.04747 cents
+YIN 96000Hz / 880Hz error 2.04731 cents
+Pitch impulse peak 2623 reported 2623
+PASS: YIN, linked auto-gain, mono/stereo saturation, oversize blocks, profile transfer, pitch latency

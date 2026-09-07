@@ -1,0 +1,8 @@
+PASS chain 44100 Hz 1 ch; dry/bypass delay 2629
+PASS chain 44100 Hz 2 ch; dry/bypass delay 2629
+PASS chain 48000 Hz 1 ch; dry/bypass delay 2629
+PASS chain 48000 Hz 2 ch; dry/bypass delay 2629
+PASS chain 96000 Hz 1 ch; dry/bypass delay 4677
+PASS chain 96000 Hz 2 ch; dry/bypass delay 4677
+PASS state roundtrip: parameters and voice profile
+PASS editor creation, tabs, snapshots, resize

@@ -1,0 +1,24 @@
+Compiled juce_core.cpp
+Compiled juce_audio_basics.cpp
+Compiled juce_dsp.cpp
+Compiled juce_core_CompilationTime.cpp
+Compiled RubberBandSingle.cpp
+Compiled juce_audio_formats.cpp
+Compiled dsp_tests.cpp
+YIN 44100Hz / 80Hz error 0.0435455 cents
+YIN 44100Hz / 110Hz error 0.0691356 cents
+YIN 44100Hz / 220Hz error 0.318207 cents
+YIN 44100Hz / 440Hz error 1.37476 cents
+YIN 44100Hz / 880Hz error 1.47045 cents
+YIN 48000Hz / 80Hz error 0.0385925 cents
+YIN 48000Hz / 110Hz error 0.0716121 cents
+YIN 48000Hz / 220Hz error 0.104425 cents
+YIN 48000Hz / 440Hz error 0.976723 cents
+YIN 48000Hz / 880Hz error 2.02896 cents
+YIN 96000Hz / 80Hz error 0.0113508 cents
+YIN 96000Hz / 110Hz error 0.0134146 cents
+YIN 96000Hz / 220Hz error 0.0594362 cents
+YIN 96000Hz / 440Hz error 0.105663 cents
+YIN 96000Hz / 880Hz error 0.989305 cents
+Pitch impulse peak 2623 reported 2623
+PASS: YIN, linked auto-gain, mono/stereo saturation, oversize blocks, profile transfer, pitch latency

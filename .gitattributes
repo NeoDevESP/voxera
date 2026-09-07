@@ -1,0 +1,17 @@
+# Shell scripts must keep LF endings whatever platform commits them: a .sh file
+# checked out with CRLF fails on macOS and Linux with "bad interpreter: ^M",
+# which would break the macOS build the moment it ran on a runner.
+*.sh text eol=lf
+
+# Same reasoning for the workflow files the runners read.
+*.yml text eol=lf
+
+# Windows-only scripts keep CRLF.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# Everything else is normalised in the repository and checked out natively.
+* text=auto
+
+*.png binary
+*.jpeg binary

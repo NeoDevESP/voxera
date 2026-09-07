@@ -1,0 +1,843 @@
+#include "PluginProcessor.h"
+#include "PluginEditor.h"
+#include "DSP/RealtimeUtilities.h"
+
+namespace ParamIDs
+{
+    static constexpr auto inputDb = "inputDb";
+    static constexpr auto autoGain = "autoGain";
+    static constexpr auto targetDb = "targetDb";
+
+    static constexpr auto pitchOn = "pitchOn";
+    static constexpr auto pitchKey = "pitchKey";
+    static constexpr auto pitchScale = "pitchScale";
+    static constexpr auto pitchMode = "pitchMode";
+    static constexpr auto tuneAmount = "tuneAmount";
+    static constexpr auto retune = "retune";
+    static constexpr auto humanize = "humanize";
+    static constexpr auto formant = "formant";
+    static constexpr auto analyzeVoice = "analyzeVoice";
+    static constexpr auto autoVoice = "autoVoice";
+
+    static constexpr auto spectralOn = "spectralOn";
+    static constexpr auto clean = "clean";
+    static constexpr auto bodyDb = "bodyDb";
+    static constexpr auto presenceDb = "presenceDb";
+    static constexpr auto deEss = "deEss";
+    static constexpr auto airDb = "airDb";
+
+    static constexpr auto compThreshold = "compThreshold";
+    static constexpr auto compRatio = "compRatio";
+    static constexpr auto compAttack = "compAttack";
+    static constexpr auto compRelease = "compRelease";
+
+    static constexpr auto satDrive = "satDrive";
+    static constexpr auto satMix = "satMix";
+
+    static constexpr auto spatialOn = "spatialOn";
+    static constexpr auto width = "width";
+    static constexpr auto doubler = "doubler";
+    static constexpr auto delayMix = "delayMix";
+    static constexpr auto delayFeedback = "delayFeedback";
+    static constexpr auto delayDivision = "delayDivision";
+    static constexpr auto space = "space";
+    static constexpr auto duck = "duck";
+
+    static constexpr auto outputDb = "outputDb";
+
+    static constexpr auto toneMacro = "toneMacro";
+    static constexpr auto globalMix = "globalMix";
+    static constexpr auto bypass = "bypass";
+    static constexpr auto smartEQAmount = "smartEQAmount";
+    static constexpr auto smartEQRange = "smartEQRange";
+    static constexpr auto smartEQResponse = "smartEQResponse";
+
+    static constexpr auto limiterOn = "limiterOn";
+    static constexpr auto limiterCeiling = "limiterCeiling";
+
+    static constexpr auto punch = "punch";
+    static constexpr auto exciter = "exciter";
+
+    static constexpr auto gateOn = "gateOn";
+    static constexpr auto gateThreshold = "gateThreshold";
+    static constexpr auto optical = "optical";
+    static constexpr auto clipAmount = "clipAmount";
+    static constexpr auto character = "character";
+    static constexpr auto lowLatency = "lowLatency";
+}
+
+VoxeraAudioProcessor::VoxeraAudioProcessor()
+    : AudioProcessor(BusesProperties()
+                         .withInput("Input", juce::AudioChannelSet::stereo(), true)
+                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      apvts(*this, nullptr, "PARAMETERS", createParameterLayout())
+{
+    bindParameters();
+}
+
+void VoxeraAudioProcessor::bindParameters()
+{
+    const auto bind = [this](const char* id)
+    {
+        auto* raw = apvts.getRawParameterValue(id);
+        jassert(raw != nullptr);
+        return raw;
+    };
+
+    prm.inputDb = bind(ParamIDs::inputDb);
+    prm.autoGain = bind(ParamIDs::autoGain);
+    prm.targetDb = bind(ParamIDs::targetDb);
+    prm.pitchOn = bind(ParamIDs::pitchOn);
+    prm.pitchKey = bind(ParamIDs::pitchKey);
+    prm.pitchScale = bind(ParamIDs::pitchScale);
+    prm.pitchMode = bind(ParamIDs::pitchMode);
+    prm.tuneAmount = bind(ParamIDs::tuneAmount);
+    prm.retune = bind(ParamIDs::retune);
+    prm.humanize = bind(ParamIDs::humanize);
+    prm.formant = bind(ParamIDs::formant);
+    prm.analyzeVoice = bind(ParamIDs::analyzeVoice);
+    prm.autoVoice = bind(ParamIDs::autoVoice);
+    prm.spectralOn = bind(ParamIDs::spectralOn);
+    prm.clean = bind(ParamIDs::clean);
+    prm.bodyDb = bind(ParamIDs::bodyDb);
+    prm.presenceDb = bind(ParamIDs::presenceDb);
+    prm.deEss = bind(ParamIDs::deEss);
+    prm.airDb = bind(ParamIDs::airDb);
+    prm.compThreshold = bind(ParamIDs::compThreshold);
+    prm.compRatio = bind(ParamIDs::compRatio);
+    prm.compAttack = bind(ParamIDs::compAttack);
+    prm.compRelease = bind(ParamIDs::compRelease);
+    prm.satDrive = bind(ParamIDs::satDrive);
+    prm.satMix = bind(ParamIDs::satMix);
+    prm.spatialOn = bind(ParamIDs::spatialOn);
+    prm.width = bind(ParamIDs::width);
+    prm.doubler = bind(ParamIDs::doubler);
+    prm.delayMix = bind(ParamIDs::delayMix);
+    prm.delayFeedback = bind(ParamIDs::delayFeedback);
+    prm.delayDivision = bind(ParamIDs::delayDivision);
+    prm.space = bind(ParamIDs::space);
+    prm.duck = bind(ParamIDs::duck);
+    prm.outputDb = bind(ParamIDs::outputDb);
+    prm.toneMacro = bind(ParamIDs::toneMacro);
+    prm.globalMix = bind(ParamIDs::globalMix);
+    prm.bypass = bind(ParamIDs::bypass);
+    prm.smartEQAmount = bind(ParamIDs::smartEQAmount);
+    prm.smartEQRange = bind(ParamIDs::smartEQRange);
+    prm.smartEQResponse = bind(ParamIDs::smartEQResponse);
+    prm.limiterOn = bind(ParamIDs::limiterOn);
+    prm.limiterCeiling = bind(ParamIDs::limiterCeiling);
+    prm.punch = bind(ParamIDs::punch);
+    prm.exciter = bind(ParamIDs::exciter);
+    prm.gateOn = bind(ParamIDs::gateOn);
+    prm.gateThreshold = bind(ParamIDs::gateThreshold);
+    prm.optical = bind(ParamIDs::optical);
+    prm.clipAmount = bind(ParamIDs::clipAmount);
+    prm.character = bind(ParamIDs::character);
+    prm.lowLatency = bind(ParamIDs::lowLatency);
+}
+
+/*  Parameters are grouped so hosts and the advanced page show a structured tree
+    instead of forty flat entries. Declaration order is unchanged from 0.8.0, so
+    parameter indices and IDs — and therefore existing automation — still match.
+    New parameters are appended at the end for the same reason.
+*/
+juce::AudioProcessorValueTreeState::ParameterLayout VoxeraAudioProcessor::createParameterLayout()
+{
+    using Group = juce::AudioProcessorParameterGroup;
+
+    const auto group = [](const char* id, const char* name, auto&&... members)
+    {
+        return std::make_unique<Group>(id, name, "|", std::move(members)...);
+    };
+    const auto number = [](const char* id, const char* name,
+                           juce::NormalisableRange<float> range, float initial)
+    {
+        return std::make_unique<juce::AudioParameterFloat>(id, name, range, initial);
+    };
+    const auto toggle = [](const char* id, const char* name, bool initial)
+    {
+        return std::make_unique<juce::AudioParameterBool>(id, name, initial);
+    };
+    const auto choice = [](const char* id, const char* name, juce::StringArray options, int initial)
+    {
+        return std::make_unique<juce::AudioParameterChoice>(id, name, std::move(options), initial);
+    };
+
+    juce::AudioProcessorValueTreeState::ParameterLayout layout;
+
+    layout.add(
+        group("io", "Input",
+            number(ParamIDs::inputDb, "Input", { -24.0f, 24.0f, 0.1f }, 0.0f),
+            toggle(ParamIDs::autoGain, "Auto Gain", true),
+            number(ParamIDs::targetDb, "Auto Gain Target", { -30.0f, -10.0f, 0.1f }, -18.0f)),
+
+        group("pitch", "Pitch",
+            toggle(ParamIDs::pitchOn, "Pitch Correction", true),
+            choice(ParamIDs::pitchKey, "Key",
+                { "C", "C#/Db", "D", "D#/Eb", "E", "F",
+                  "F#/Gb", "G", "G#/Ab", "A", "A#/Bb", "B" }, 0),
+            choice(ParamIDs::pitchScale, "Scale",
+                { "Chromatic", "Major", "Natural Minor", "Harmonic Minor", "Dorian" }, 0),
+            choice(ParamIDs::pitchMode, "Tune Mode", { "Natural", "Modern", "Hard" }, 1),
+            number(ParamIDs::tuneAmount, "Tune Amount", { 0.0f, 100.0f, 0.1f }, 100.0f),
+            number(ParamIDs::retune, "Retune", { 0.0f, 100.0f, 0.1f }, 65.0f),
+            number(ParamIDs::humanize, "Humanize", { 0.0f, 100.0f, 0.1f }, 35.0f),
+            number(ParamIDs::formant, "Formant", { -12.0f, 12.0f, 0.1f }, 0.0f),
+            toggle(ParamIDs::analyzeVoice, "Analyze Voice (8s)", false),
+            number(ParamIDs::autoVoice, "Auto Voice", { 0.0f, 100.0f, 0.1f }, 0.0f)),
+
+        group("spectral", "Spectral",
+            toggle(ParamIDs::spectralOn, "Adaptive Spectral Engine", true),
+            number(ParamIDs::clean, "Clean", { 0.0f, 100.0f, 0.1f }, 55.0f),
+            number(ParamIDs::bodyDb, "Body", { -6.0f, 6.0f, 0.1f }, 0.0f),
+            number(ParamIDs::presenceDb, "Presence", { -6.0f, 6.0f, 0.1f }, 0.0f),
+            number(ParamIDs::deEss, "De-Ess", { 0.0f, 100.0f, 0.1f }, 55.0f),
+            number(ParamIDs::airDb, "Air", { -8.0f, 8.0f, 0.1f }, 0.0f)),
+
+        group("dynamics", "Dynamics",
+            number(ParamIDs::compThreshold, "Comp Threshold", { -48.0f, 0.0f, 0.1f }, -18.0f),
+            number(ParamIDs::compRatio, "Comp Ratio", { 1.0f, 20.0f, 0.1f, 0.5f }, 3.0f),
+            number(ParamIDs::compAttack, "Comp Attack", { 0.1f, 100.0f, 0.1f, 0.35f }, 8.0f),
+            number(ParamIDs::compRelease, "Comp Release", { 10.0f, 500.0f, 1.0f, 0.5f }, 90.0f)),
+
+        group("saturation", "Saturation",
+            number(ParamIDs::satDrive, "Saturation Drive", { 0.0f, 24.0f, 0.1f }, 4.0f),
+            number(ParamIDs::satMix, "Saturation Mix", { 0.0f, 100.0f, 0.1f }, 15.0f)),
+
+        group("spatial", "Spatial",
+            toggle(ParamIDs::spatialOn, "Spatial Engine", true),
+            number(ParamIDs::width, "Width", { 0.0f, 100.0f, 0.1f }, 65.0f),
+            number(ParamIDs::doubler, "Double", { 0.0f, 100.0f, 0.1f }, 22.0f),
+            number(ParamIDs::delayMix, "Delay", { 0.0f, 100.0f, 0.1f }, 12.0f),
+            number(ParamIDs::delayFeedback, "Delay Feedback", { 0.0f, 100.0f, 0.1f }, 34.0f),
+            choice(ParamIDs::delayDivision, "Delay Division",
+                { "1/8", "1/4", "1/4 Dotted", "1/8 Triplet", "1/2" }, 1),
+            number(ParamIDs::space, "Space", { 0.0f, 100.0f, 0.1f }, 18.0f),
+            number(ParamIDs::duck, "Spatial Ducking", { 0.0f, 100.0f, 0.1f }, 65.0f)),
+
+        group("master", "Output",
+            number(ParamIDs::outputDb, "Output", { -24.0f, 24.0f, 0.1f }, 0.0f),
+            number(ParamIDs::toneMacro, "Tone", { -100.0f, 100.0f, 0.1f }, 0.0f),
+            number(ParamIDs::globalMix, "Global Mix", { 0.0f, 100.0f, 0.1f }, 100.0f),
+            toggle(ParamIDs::bypass, "Bypass", false)),
+
+        group("smarteq", "Smart EQ",
+            number(ParamIDs::smartEQAmount, "Smart EQ Amount", { 0.0f, 100.0f, 0.1f }, 0.0f),
+            number(ParamIDs::smartEQRange, "Smart EQ Budget dB", { 1.0f, 6.0f, 0.1f }, 3.0f),
+            number(ParamIDs::smartEQResponse, "Smart EQ Response ms", { 100.0f, 1000.0f, 1.0f }, 250.0f)),
+
+        group("limiter", "Limiter",
+            toggle(ParamIDs::limiterOn, "Limiter", true),
+            number(ParamIDs::limiterCeiling, "Ceiling", { -6.0f, 0.0f, 0.1f }, -0.3f)),
+
+        group("character", "Character",
+            number(ParamIDs::punch, "Punch", { 0.0f, 100.0f, 0.1f }, 0.0f),
+            number(ParamIDs::exciter, "Exciter", { 0.0f, 100.0f, 0.1f }, 0.0f)),
+
+        group("gate", "Gate",
+            toggle(ParamIDs::gateOn, "Gate", true),
+            number(ParamIDs::gateThreshold, "Gate Threshold", { -80.0f, -20.0f, 0.5f }, -55.0f)),
+
+        group("colour", "Colour",
+            number(ParamIDs::optical, "Optical", { 0.0f, 100.0f, 0.1f }, 0.0f),
+            number(ParamIDs::clipAmount, "Clip", { 0.0f, 100.0f, 0.1f }, 0.0f),
+            choice(ParamIDs::character, "Voice Character",
+                { "Neutral", "Bright", "Dark", "Ghost", "Robot", "Demon" }, 0)),
+
+        group("tracking", "Tracking",
+            toggle(ParamIDs::lowLatency, "Low Latency", false)));
+
+    return layout;
+}
+
+void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
+{
+    if (!std::isfinite(sampleRate) || sampleRate <= 0.0) sampleRate = 48000.0;
+    samplesPerBlock = juce::jmax(1, samplesPerBlock);
+    preparedBlockSize = samplesPerBlock;
+    const juce::dsp::ProcessSpec spec
+    {
+        sampleRate,
+        static_cast<juce::uint32>(samplesPerBlock),
+        static_cast<juce::uint32>(getTotalNumOutputChannels())
+    };
+
+    previousAnalyzeState = false;
+    autoGain.prepare(sampleRate);
+    voiceProfile.prepare(sampleRate);
+    voiceProfile.restoreProfile(publishedProfile.read());
+    pitchEngine.prepare(sampleRate, samplesPerBlock, getTotalNumOutputChannels());
+    spectralEngine.prepare(sampleRate, samplesPerBlock, getTotalNumOutputChannels());
+    smartEQ.prepare(sampleRate, getTotalNumOutputChannels());
+
+    compressor.prepare(spec);
+    compressor.reset();
+
+    gate.prepare(sampleRate, getTotalNumOutputChannels());
+    optical.prepare(sampleRate, getTotalNumOutputChannels());
+    punch.prepare(spec);
+    exciter.prepare(sampleRate, getTotalNumOutputChannels());
+    character.prepare(sampleRate, getTotalNumOutputChannels());
+    softClip.prepare(sampleRate, getTotalNumOutputChannels());
+    saturator.prepare(spec);
+    spatialEngine.prepare(sampleRate, getTotalNumOutputChannels());
+    limiter.prepare(sampleRate, getTotalNumOutputChannels());
+    limiter.setReleaseMs(80.0f);
+
+    inputGain.reset(sampleRate, 0.020);
+    outputGain.reset(sampleRate, 0.020);
+    inputGain.setCurrentAndTargetValue(1.0f);
+    outputGain.setCurrentAndTargetValue(1.0f);
+
+    /*  The gate and limiter look-ahead delays run whether or not those stages
+        are doing anything, so their contribution is constant. The shifter's is
+        not: bypassing it for tracking removes around 55 ms, which is the entire
+        reason that mode exists.
+    */
+    shifterBypassed = prm.lowLatency->load() > 0.5f;
+    pitchEngine.setShifterBypassed(false);
+    const int fixedLatency =
+        gate.getLatencySamples()
+        + static_cast<int>(std::ceil(saturator.getLatencySamples()))
+        + limiter.getLatencySamples();
+    fullLatencySamples = fixedLatency + pitchEngine.getLatencySamples();
+    trackingLatencySamples = fixedLatency;
+
+    pitchEngine.setShifterBypassed(shifterBypassed);
+    const int latency = shifterBypassed ? trackingLatencySamples : fullLatencySamples;
+    activeLatencySamples.store(latency);
+    setLatencySamples(latency);
+
+    // Allocated for the larger of the two so a mode switch only moves an offset.
+    dryDelay.prepare(getTotalNumOutputChannels(), fullLatencySamples);
+    dryDelay.setDelay(latency);
+    dryBuffer.setSize(getTotalNumOutputChannels(), preparedBlockSize);
+    globalWet.reset(sampleRate, 0.020);
+    globalWet.setCurrentAndTargetValue(prm.bypass->load() > 0.5f
+        ? 0.0f : prm.globalMix->load() * 0.01f);
+    scopeWrite = scopeDecimation = 0;
+    for (auto& sample : scope) sample.store(0.0f);
+    scopeHead.store(0);
+}
+
+void VoxeraAudioProcessor::releaseResources()
+{
+    autoGain.reset();
+    voiceProfile.reset();
+    pitchEngine.reset();
+    spectralEngine.reset();
+    smartEQ.reset();
+    compressor.reset();
+    saturator.reset();
+    spatialEngine.reset();
+    gate.reset();
+    optical.reset();
+    punch.reset();
+    exciter.reset();
+    character.reset();
+    softClip.reset();
+    limiter.reset();
+}
+
+/*  Mono in / stereo out is accepted alongside the matched layouts: vocals are
+    usually recorded mono, and Width, Double and the stereo delay have nothing to
+    work with unless the chain is allowed to open out to two channels.
+*/
+bool VoxeraAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
+{
+    const auto mainIn = layouts.getMainInputChannelSet();
+    const auto mainOut = layouts.getMainOutputChannelSet();
+
+    if (mainOut != juce::AudioChannelSet::mono()
+        && mainOut != juce::AudioChannelSet::stereo())
+        return false;
+
+    if (mainIn == mainOut)
+        return true;
+
+    return mainIn == juce::AudioChannelSet::mono()
+        && mainOut == juce::AudioChannelSet::stereo();
+}
+
+void VoxeraAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    processAudio(buffer, false);
+}
+
+void VoxeraAudioProcessor::processBlockBypassed(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    processAudio(buffer, true);
+}
+
+juce::AudioProcessorParameter* VoxeraAudioProcessor::getBypassParameter() const
+{
+    return apvts.getParameter("bypass");
+}
+
+void VoxeraAudioProcessor::processAudio(juce::AudioBuffer<float>& buffer, bool hostBypass)
+{
+    if (buffer.getNumSamples() == 0 || buffer.getNumChannels() == 0) return;
+    inputMeters.analyse(buffer);
+    for (int offset = 0; offset < buffer.getNumSamples(); offset += preparedBlockSize)
+    {
+        const int count = juce::jmin(preparedBlockSize, buffer.getNumSamples() - offset);
+        float* pointers[2] { buffer.getWritePointer(0) + offset,
+            buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) + offset : nullptr };
+        juce::AudioBuffer<float> chunk(pointers, juce::jmin(2, buffer.getNumChannels()), count);
+        processChunk(chunk, hostBypass);
+    }
+    meters.analyse(buffer);
+}
+
+void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool hostBypass)
+{
+    juce::ScopedNoDenormals noDenormals;
+
+    if (buffer.getNumSamples() == 0 || buffer.getNumChannels() == 0)
+        return;
+
+    const auto totalIn = getTotalNumInputChannels();
+    const auto totalOut = getTotalNumOutputChannels();
+
+    // Mono in / stereo out: mirror the input before anything else so the dry
+    // path, the spatial stage and the limiter all see two channels. Matched
+    // layouts never enter this loop.
+    const int upmixTo = juce::jmin(totalOut, buffer.getNumChannels());
+    for (auto ch = totalIn; ch < upmixTo; ++ch)
+    {
+        if (totalIn > 0) buffer.copyFrom(ch, 0, buffer, 0, 0, buffer.getNumSamples());
+        else             buffer.clear(ch, 0, buffer.getNumSamples());
+    }
+
+    VoiceProfileEngine::Profile restored;
+    if (pendingProfile.tryRead(restored, true)) {
+        voiceProfile.restoreProfile(restored);
+        profileNeedsPublish = false;
+    }
+    for (int i = 0; i < buffer.getNumSamples(); ++i) {
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            dryBuffer.getWritePointer(ch)[i] = dryDelay.process(ch, buffer.getReadPointer(ch)[i]);
+        dryDelay.advance();
+    }
+
+    /*  A tracking-mode switch changes the reported latency, which only the
+        message thread may tell the host about. Here the change is applied to the
+        signal path — both of which are integer writes into storage prepare
+        already sized — and the notification is handed over.
+    */
+    if (const bool wantsTracking = prm.lowLatency->load() > 0.5f; wantsTracking != shifterBypassed)
+    {
+        shifterBypassed = wantsTracking;
+        pitchEngine.setShifterBypassed(wantsTracking);
+        pitchEngine.reset();
+        const int latency = wantsTracking ? trackingLatencySamples : fullLatencySamples;
+        activeLatencySamples.store(latency);
+        dryDelay.setDelay(latency);
+        latencyChangePending.store(true);
+        triggerAsyncUpdate();
+    }
+
+    const float inDb = prm.inputDb->load();
+    inputGain.setTargetValue(juce::Decibels::decibelsToGain(inDb));
+
+    voxera::applyLinkedGain(buffer, inputGain);
+
+    // First in the chain, so room noise is never pitch-shifted, compressed up
+    // or sent to the reverb — and so the profiler measures the voice, not the
+    // room it was recorded in.
+    gate.setEnabled(prm.gateOn->load() > 0.5f);
+    gate.setThresholdDb(prm.gateThreshold->load());
+    gate.process(buffer);
+
+    const bool analyzeNow = prm.analyzeVoice->load() > 0.5f;
+
+    if (captureRequested.exchange(false) || (analyzeNow && !previousAnalyzeState))
+        voiceProfile.startCapture(8.0f);
+
+    previousAnalyzeState = analyzeNow;
+    const bool captureWasRunning = voiceProfile.isCapturing();
+
+    if (voiceProfile.isCapturing())
+    {
+        const auto* l = buffer.getReadPointer(0);
+        const auto* r = buffer.getNumChannels() > 1 ? buffer.getReadPointer(1) : nullptr;
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const float mono = r != nullptr
+                ? 0.5f * (l[i] + r[i])
+                : l[i];
+
+            voiceProfile.pushSample(mono);
+        }
+    }
+
+    autoGain.setEnabled(prm.autoGain->load() > 0.5f);
+    autoGain.setTargetDb(prm.targetDb->load());
+    autoGain.process(buffer);
+
+    // Pitch before spectral repair: the spectral engine cleans any new
+    // resonant emphasis generated by resynthesis.
+    pitchEngine.setEnabled(prm.pitchOn->load() > 0.5f);
+    pitchEngine.setRoot(static_cast<int>(std::lround(prm.pitchKey->load())));
+    pitchEngine.setScale(static_cast<int>(std::lround(prm.pitchScale->load())));
+    pitchEngine.setMode(static_cast<int>(std::lround(prm.pitchMode->load())));
+    pitchEngine.setAmount(prm.tuneAmount->load() * 0.01f);
+    pitchEngine.setRetune(prm.retune->load() * 0.01f);
+    pitchEngine.setHumanize(prm.humanize->load() * 0.01f);
+    // The character's formant offset rides on top of the user's own setting;
+    // the shifter is what moves formants without moving pitch, so it is applied
+    // here rather than approximated with filters later.
+    character.setType(static_cast<int>(std::lround(prm.character->load())));
+    pitchEngine.setFormantSemitones(prm.formant->load() + character.formantOffsetSemitones());
+    pitchEngine.process(buffer);
+
+    if (voiceProfile.isCapturing())
+        voiceProfile.pushPitch(
+            pitchEngine.getDetectedHz(),
+            pitchEngine.getConfidence());
+
+    const auto profile = voiceProfile.getProfile();
+    const float autoVoice = prm.autoVoice->load() * 0.01f;
+
+    float clean = prm.clean->load() * 0.01f;
+    float deEss = prm.deEss->load() * 0.01f;
+    float airDb = prm.airDb->load();
+    float bodyDb = prm.bodyDb->load();
+    float presenceDb = prm.presenceDb->load();
+    const float tone = prm.toneMacro->load() * 0.01f;
+    bodyDb -= 2.5f * tone;
+    presenceDb += 2.0f * tone;
+    airDb += 2.0f * tone;
+
+    if (profile.ready && autoVoice > 0.0f)
+    {
+        const float sibilantBias =
+            juce::jlimit(0.0f, 1.0f, profile.sibilance * 28.0f);
+
+        const float brightBias =
+            juce::jlimit(0.0f, 1.0f, profile.brightness * 18.0f);
+
+        const float denseLow =
+            juce::jlimit(0.0f, 1.0f, profile.lowMid * 12.0f);
+
+        deEss = juce::jlimit(
+            0.0f, 1.0f,
+            deEss + autoVoice * 0.35f * sibilantBias);
+
+        clean = juce::jlimit(
+            0.0f, 1.0f,
+            clean + autoVoice * 0.20f * denseLow);
+
+        airDb += autoVoice * (1.2f - 2.0f * brightBias);
+        bodyDb -= autoVoice * 1.5f * denseLow;
+        presenceDb += autoVoice * 0.8f * (1.0f - brightBias);
+    }
+
+    spectralEngine.setEnabled(prm.spectralOn->load() > 0.5f);
+    spectralEngine.setClean(clean);
+    spectralEngine.setBodyDb(bodyDb);
+    spectralEngine.setPresenceDb(presenceDb);
+    spectralEngine.setDeEss(deEss);
+    spectralEngine.setAirDb(airDb);
+    spectralEngine.process(buffer);
+    smartEQ.setParameters(prm.smartEQAmount->load() * 0.01f,
+        prm.smartEQRange->load(), prm.smartEQResponse->load());
+    smartEQ.process(buffer);
+
+    // Before the dynamics stages, so they respond to the voice as coloured
+    // rather than to one the listener never hears.
+    character.process(buffer);
+
+    float compThreshold = prm.compThreshold->load();
+
+    if (profile.ready && autoVoice > 0.0f)
+    {
+        const float crestNeed =
+            juce::jlimit(0.0f, 1.0f, (profile.crestDb - 7.0f) / 10.0f);
+
+        compThreshold -= autoVoice * 4.0f * crestNeed;
+    }
+
+    compressor.setThreshold(compThreshold);
+    compressor.setRatio(prm.compRatio->load());
+    compressor.setAttack(prm.compAttack->load());
+    compressor.setRelease(prm.compRelease->load());
+
+    juce::dsp::AudioBlock<float> block(buffer);
+    juce::dsp::ProcessContextReplacing<float> context(block);
+    compressor.process(context);
+
+    // The slow half of the two-stage topology: the compressor above catches
+    // individual peaks, this levels whole syllables and phrases. Splitting the
+    // work across two time scales is what avoids audible pumping.
+    optical.setAmount(prm.optical->load() * 0.01f);
+    optical.process(buffer);
+
+    // Parallel, and last of the three, so it fills the gaps the serial stages
+    // just opened rather than fighting an already-dense signal.
+    punch.setAmount(prm.punch->load() * 0.01f);
+    punch.process(buffer);
+
+    saturator.setDriveDb(prm.satDrive->load());
+    saturator.setMix(prm.satMix->load() * 0.01f);
+    saturator.process(buffer);
+
+    // After saturation so the generated top is not put through the shaper a
+    // second time, and before the spatial stage so the delay and reverb carry
+    // that air into their tails.
+    exciter.setAmount(prm.exciter->load() * 0.01f);
+    exciter.process(buffer);
+
+    double bpm = 120.0;
+    if (auto* playHead = getPlayHead())
+    {
+        if (auto position = playHead->getPosition())
+        {
+            if (auto hostBpm = position->getBpm())
+                bpm = *hostBpm;
+        }
+    }
+
+    spatialEngine.setEnabled(prm.spatialOn->load() > 0.5f);
+    spatialEngine.setTempo(bpm);
+    spatialEngine.setDivision(static_cast<int>(std::lround(prm.delayDivision->load())));
+    spatialEngine.setWidth(prm.width->load() * 0.01f);
+    spatialEngine.setDouble(prm.doubler->load() * 0.01f);
+    spatialEngine.setDelay(prm.delayMix->load() * 0.01f);
+    spatialEngine.setDelayFeedback(prm.delayFeedback->load() * 0.01f);
+    spatialEngine.setSpace(prm.space->load() * 0.01f);
+    spatialEngine.setDuck(prm.duck->load() * 0.01f);
+    spatialEngine.process(buffer);
+
+    const float outDb = prm.outputDb->load();
+    outputGain.setTargetValue(juce::Decibels::decibelsToGain(outDb));
+
+    voxera::applyLinkedGain(buffer, outputGain);
+
+    // Rounding the peaks here means the limiter below has far less to pull down,
+    // which is what lets the average level rise without it becoming audible.
+    softClip.setAmount(prm.clipAmount->load() * 0.01f);
+    softClip.process(buffer);
+
+    // Last in the chain: saturation, spatial feedback and output gain all sit
+    // upstream, so this is the only point that can promise the ceiling holds.
+    limiter.setEnabled(prm.limiterOn->load() > 0.5f);
+    limiter.setCeilingDb(prm.limiterCeiling->load());
+    limiter.process(buffer);
+
+    const bool bypass = hostBypass || prm.bypass->load() > 0.5f;
+    globalWet.setTargetValue(bypass ? 0.0f : prm.globalMix->load() * 0.01f);
+    for (int i = 0; i < buffer.getNumSamples(); ++i) {
+        const float wet = globalWet.getNextValue();
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+            auto& y = buffer.getWritePointer(ch)[i];
+            y = wet * y + (1.0f - wet) * dryBuffer.getReadPointer(ch)[i];
+        }
+        if (++scopeDecimation >= 16) {
+            scopeDecimation = 0;
+            scope[static_cast<size_t>(scopeWrite)].store(buffer.getReadPointer(0)[i], std::memory_order_relaxed);
+            scopeWrite = (scopeWrite + 1) % 256;
+        }
+    }
+    scopeHead.store(scopeWrite, std::memory_order_relaxed);
+    capturing.store(voiceProfile.isCapturing());
+    captureProgress.store(voiceProfile.getProgress());
+    profileReady.store(profile.ready);
+    if (captureWasRunning && !voiceProfile.isCapturing()) profileNeedsPublish = true;
+    if (profileNeedsPublish && publishedProfile.tryPublish(profile)) profileNeedsPublish = false;
+    // Only once the profile is visible to the other thread is there anything
+    // for the auto-mix to read.
+    if (captureWasRunning && !voiceProfile.isCapturing() && autoMixRequested.load())
+        triggerAsyncUpdate();
+}
+
+juce::AudioProcessorEditor* VoxeraAudioProcessor::createEditor()
+{
+    return new VoxeraAudioProcessorEditor(*this);
+}
+
+void VoxeraAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
+{
+    auto state = apvts.copyState();
+    state.setProperty("voxeraStateVersion", stateVersion, nullptr);
+    // Capture is a transient action, not a task to repeat when reopening a session.
+    auto captureParameter = state.getChildWithProperty("id", "analyzeVoice");
+    if (captureParameter.isValid()) captureParameter.setProperty("value", 0.0f, nullptr);
+    auto oldProfile = state.getChildWithName("VoiceProfile");
+    if (oldProfile.isValid()) state.removeChild(oldProfile, nullptr);
+    const auto profile = publishedProfile.read();
+    juce::ValueTree saved("VoiceProfile");
+    saved.setProperty("ready", profile.ready, nullptr);
+    saved.setProperty("rms", profile.avgRmsDb, nullptr);
+    saved.setProperty("crest", profile.crestDb, nullptr);
+    saved.setProperty("low", profile.lowMid, nullptr);
+    saved.setProperty("presence", profile.presence, nullptr);
+    saved.setProperty("sibilance", profile.sibilance, nullptr);
+    saved.setProperty("brightness", profile.brightness, nullptr);
+    saved.setProperty("confidence", profile.pitchConfidence, nullptr);
+    saved.setProperty("range", profile.pitchRangeSemitones, nullptr);
+    state.addChild(saved, -1, nullptr);
+    std::unique_ptr<juce::XmlElement> xml(state.createXml());
+    copyXmlToBinary(*xml, destData);
+}
+
+void VoxeraAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
+{
+    std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
+    if (xml != nullptr && xml->hasTagName(apvts.state.getType())) {
+        auto state = juce::ValueTree::fromXml(*xml);
+        const auto saved = state.getChildWithName("VoiceProfile");
+        VoiceProfileEngine::Profile p;
+        auto number = [&saved](const char* key, float fallback, float lo, float hi) {
+            const float value = static_cast<float>(saved.getProperty(key, fallback));
+            return std::isfinite(value) ? juce::jlimit(lo, hi, value) : fallback;
+        };
+        if (saved.isValid()) {
+            p.avgRmsDb = number("rms", -60.0f, -120.0f, 24.0f);
+            p.crestDb = number("crest", 0.0f, 0.0f, 120.0f);
+            p.lowMid = number("low", 0.0f, 0.0f, 1.0f);
+            p.presence = number("presence", 0.0f, 0.0f, 1.0f);
+            p.sibilance = number("sibilance", 0.0f, 0.0f, 1.0f);
+            p.brightness = number("brightness", 0.0f, 0.0f, 2.0f);
+            p.pitchConfidence = number("confidence", 0.0f, 0.0f, 1.0f);
+            p.pitchRangeSemitones = number("range", 0.0f, 0.0f, 96.0f);
+            p.ready = static_cast<bool>(saved.getProperty("ready", false)) && p.avgRmsDb > -55.0f;
+        }
+        /*  A state written by an older build has no entry for parameters added
+            since. Walking the current parameter list rather than a hand-kept ID
+            list means every future addition is restored to its default without
+            anyone having to remember to update this loop.
+        */
+        const int savedVersion = static_cast<int>(state.getProperty("voxeraStateVersion", 1));
+        if (savedVersion < stateVersion) {
+            for (auto* parameter : getParameters()) {
+                auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(parameter);
+                if (ranged == nullptr) continue;
+                if (state.getChildWithProperty("id", ranged->paramID).isValid()) continue;
+                juce::ValueTree restored("PARAM");
+                restored.setProperty("id", ranged->paramID, nullptr);
+                restored.setProperty("value", ranged->convertFrom0to1(ranged->getDefaultValue()), nullptr);
+                state.addChild(restored, -1, nullptr);
+            }
+        }
+        auto captureParameter = state.getChildWithProperty("id", "analyzeVoice");
+        if (captureParameter.isValid()) captureParameter.setProperty("value", 0.0f, nullptr);
+        apvts.replaceState(state);
+        publishedProfile.publish(p);
+        pendingProfile.publish(p);
+        profileReady.store(p.ready);
+    }
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new VoxeraAudioProcessor();
+}
+
+void VoxeraAudioProcessor::setParameterNotifying(const char* id, float value)
+{
+    if (auto* parameter = apvts.getParameter(id)) {
+        parameter->beginChangeGesture();
+        parameter->setValueNotifyingHost(parameter->convertTo0to1(value));
+        parameter->endChangeGesture();
+    }
+}
+
+void VoxeraAudioProcessor::handleAsyncUpdate()
+{
+    if (latencyChangePending.exchange(false)) {
+        setLatencySamples(activeLatencySamples.load());
+        updateHostDisplay(ChangeDetails{}.withLatencyChanged(true));
+    }
+    if (autoMixRequested.exchange(false)) applyAutoMix();
+}
+
+void VoxeraAudioProcessor::applyAutoMix()
+{
+    const auto profile = publishedProfile.read();
+    // A capture that never heard a usable signal must not rewrite the chain.
+    if (!profile.ready) return;
+
+    const auto settings = voxera::decide(profile);
+    const auto set = [this](const char* id, float value) { setParameterNotifying(id, value); };
+
+    set(ParamIDs::clean, settings.clean);
+    set(ParamIDs::bodyDb, settings.bodyDb);
+    set(ParamIDs::presenceDb, settings.presenceDb);
+    set(ParamIDs::airDb, settings.airDb);
+    set(ParamIDs::deEss, settings.deEss);
+    set(ParamIDs::smartEQAmount, settings.smartEQAmount);
+    set(ParamIDs::compThreshold, settings.compThreshold);
+    set(ParamIDs::compRatio, settings.compRatio);
+    set(ParamIDs::optical, settings.optical);
+    set(ParamIDs::punch, settings.punch);
+    set(ParamIDs::clipAmount, settings.clipAmount);
+    set(ParamIDs::gateThreshold, settings.gateThresholdDb);
+    set(ParamIDs::gateOn, 1.0f);
+    set(ParamIDs::satDrive, settings.satDrive);
+    set(ParamIDs::satMix, settings.satMix);
+    set(ParamIDs::exciter, settings.exciter);
+    set(ParamIDs::tuneAmount, settings.tuneAmount);
+    set(ParamIDs::retune, settings.retune);
+    set(ParamIDs::humanize, settings.humanize);
+
+    // The analysis decides the treatment, not whether the chain runs; key,
+    // scale, gains, spatial settings, the chosen voice character and the
+    // learned profile are all left alone.
+    set(ParamIDs::pitchOn, 1.0f);
+    set(ParamIDs::spectralOn, 1.0f);
+    set(ParamIDs::limiterOn, 1.0f);
+    set(ParamIDs::toneMacro, 0.0f);
+    set(ParamIDs::globalMix, 100.0f);
+}
+
+void VoxeraAudioProcessor::applyFactoryPreset(int index)
+{
+    // Deliberately preserve key, scale, input/output gain and learned voice profile.
+    const auto set = [this](const char* id, float value) { setParameterNotifying(id, value); };
+    // Declaring both with the same extent makes a mismatched row a compile error.
+    static constexpr int numPresetValues = 10;
+    static constexpr const char* ids[numPresetValues] = {
+        "tuneAmount", "retune", "humanize", "toneMacro", "airDb",
+        "space", "satDrive", "satMix", "punch", "exciter"
+    };
+    static constexpr float values[numFactoryPresets][numPresetValues] = {
+        //  tune  retune  human   tone   air  space  drive   mix  punch  excite
+        {     35,     30,    70,     0,    0,     5,     0,    0,     0,     10 }, // Clean
+        {     55,     40,    60,   -30,   -1,    12,     6,   25,    20,      8 }, // Warm
+        {    100,     75,    25,    10,    2,    18,     4,   15,    55,     45 }, // Modern
+        {     70,     45,    65,    20,    4,    65,     3,   12,    25,     35 }, // Dream
+        {     90,     85,    10,   -65,   -5,     8,    14,   65,    70,     30 }  // Radio
+    };
+    index = juce::jlimit(0, numFactoryPresets - 1, index);
+    for (int i = 0; i < numPresetValues; ++i) set(ids[i], values[index][i]);
+    set("pitchOn", 1); set("spectralOn", 1); set("spatialOn", 1);
+    set("globalMix", 100); set("pitchMode", index == 0 ? 0.0f : index == 4 ? 2.0f : 1.0f);
+    currentProgram = index;
+    updateHostDisplay();
+}
+
+const juce::String VoxeraAudioProcessor::getProgramName(int index)
+{
+    static const char* names[numFactoryPresets] { "Clean", "Warm", "Modern", "Dream", "Radio" };
+    return names[juce::jlimit(0, numFactoryPresets - 1, index)];
+}
+
+void VoxeraAudioProcessor::setCurrentProgram(int index)
+{
+    index = juce::jlimit(0, numFactoryPresets - 1, index);
+    // A program change is a preset recall: the same parameter moves the editor
+    // buttons make, so the host sees them as ordinary automatable changes.
+    applyFactoryPreset(index);
+}
+
+// Conservative -60 dB tail estimate using the longest supported synced delay
+// (half note at 40 BPM = 3s), current feedback, and maximum reverb decay.
+double VoxeraAudioProcessor::getTailLengthSeconds() const
+{
+    const double feedback = juce::jlimit(0.0, 0.78,
+        static_cast<double>(prm.delayFeedback->load()) * 0.0078);
+    const double repeats = feedback > 0.000001 ? std::log(0.001) / std::log(feedback) : 0.0;
+    return 4.8 + 3.0 * (1.0 + repeats);
+}

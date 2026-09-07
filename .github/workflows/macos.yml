@@ -1,0 +1,106 @@
+name: macOS universal build and validation
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  macos:
+    # Apple Silicon runner. The SDK it carries contains both slices, so one
+    # machine still produces the universal binary an Intel Mac can load.
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test
+        run: |
+          chmod +x BUILD_MACOS.sh
+          ./BUILD_MACOS.sh
+
+      - name: Confirm both architectures are present
+        run: |
+          set -euo pipefail
+          BIN="build-mac/VOXERA_artefacts/Release/VST3/VOXERA.vst3/Contents/MacOS/VOXERA"
+          lipo -archs "$BIN"
+          # A missing slice is silent at build time and only shows up as "plugin
+          # will not load" on the other kind of Mac, so it is failed here.
+          lipo -archs "$BIN" | grep -q arm64
+          lipo -archs "$BIN" | grep -q x86_64
+
+      - name: Validate with pluginval
+        run: |
+          set -euo pipefail
+          curl -sSL -o pluginval.zip \
+            https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_macOS.zip
+          unzip -q pluginval.zip
+          pluginval.app/Contents/MacOS/pluginval \
+            --strictness-level 5 --skip-gui-tests --random-seed 12345 \
+            --validate "build-mac/VOXERA_artefacts/Release/VST3/VOXERA.vst3"
+
+      - name: Validate the Audio Unit with auval
+        run: |
+          set -euo pipefail
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R build-mac/VOXERA_artefacts/Release/AU/VOXERA.component ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          # Apple's own validator, and the gate Logic applies before it will
+          # load a component at all.
+          auval -v aufx Vx01 Tdly
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cd build-mac/VOXERA_artefacts/Release
+          # ditto rather than zip: it preserves the bundle metadata and symlinks
+          # that make a .component and a .vst3 loadable.
+          ditto -c -k --sequesterRsrc --keepParent VST3/VOXERA.vst3 ../../../artifacts/VOXERA-VST3.zip
+          ditto -c -k --sequesterRsrc --keepParent AU/VOXERA.component ../../../artifacts/VOXERA-AU.zip
+          ditto -c -k --sequesterRsrc --keepParent Standalone/VOXERA.app ../../../artifacts/VOXERA-Standalone.zip
+
+      - name: Write install notes
+        run: |
+          cat > artifacts/LEEME.txt <<'EOF'
+          VOXERA 0.8.0 - macOS (universal: Apple Silicon + Intel)
+
+          These builds are NOT code signed or notarised. macOS quarantines
+          anything downloaded from the internet, so Gatekeeper will refuse to
+          load them until that flag is removed. After unzipping:
+
+            xattr -dr com.apple.quarantine VOXERA.vst3
+            xattr -dr com.apple.quarantine VOXERA.component
+            xattr -dr com.apple.quarantine VOXERA.app
+
+          Then copy them into place:
+
+            VOXERA.vst3       ->  ~/Library/Audio/Plug-Ins/VST3/
+            VOXERA.component  ->  ~/Library/Audio/Plug-Ins/Components/
+
+          Logic and GarageBand need the Audio Unit (.component); they do not
+          load VST3. Logic caches its scan, so after installing run:
+
+            killall -9 AudioComponentRegistrar
+
+          and reopen Logic.
+
+          Building it yourself on your own Mac avoids the quarantine step
+          entirely: run ./BUILD_MACOS.sh --install from the source.
+          EOF
+
+      - name: Upload macOS builds
+        uses: actions/upload-artifact@v4
+        with:
+          name: VOXERA-0.8.0-macOS-universal
+          if-no-files-found: error
+          path: artifacts/
+
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VOXERA-macOS-test-evidence
+          path: |
+            build-mac/Testing/Temporary/
+            build-mac/test-previews/

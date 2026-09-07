@@ -1,0 +1,7 @@
+build/
+build-mac/
+cmake-build-*/
+dist/
+*.user
+*.suo
+.DS_Store
