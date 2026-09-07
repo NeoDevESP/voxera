@@ -138,6 +138,84 @@ int main(int argc, char** argv)
     }
     // Measured both ways at each rate, because the difference between them is
     // the pitch shifter's share of the bill and nothing else changes.
+    /*  Neural stage: a synthetic capture with known weights.
+
+        There is no .nam file to hand and none can be bundled, so the format is
+        exercised by writing one. The weights are chosen so the answer can be
+        worked out independently: with every gate weight zero and only the
+        biases set, the gates take fixed values regardless of the input, which
+        makes one LSTM step short enough to compute by hand and compare against.
+
+        This is the part of the loader worth testing. Getting the split points
+        of that flat weight array wrong produces a model that loads, runs, and
+        sounds like nothing in particular — a failure no crash would reveal.
+    */
+    {
+        const auto scratch = juce::File(argc > 1 ? argv[1] : "voxera-neural-test");
+        scratch.createDirectory();
+
+        const int hidden = 2;
+        // Order: W (1 x 4H), U (H x 4H), gate biases (4H), head (H), head bias.
+        std::vector<double> weights;
+        for (int i = 0; i < 4 * hidden; ++i) weights.push_back(0.0);              // W
+        for (int i = 0; i < hidden * 4 * hidden; ++i) weights.push_back(0.0);     // U
+        // Gates i, f, g, o. Large positive g and o, so tanh and sigmoid saturate
+        // towards one and the cell fills on the first step.
+        const double gateBias[4] { 4.0, -4.0, 4.0, 4.0 };
+        for (int g = 0; g < 4; ++g)
+            for (int h = 0; h < hidden; ++h) weights.push_back(gateBias[g]);
+        for (int h = 0; h < hidden; ++h) weights.push_back(0.5);                  // head
+        weights.push_back(0.25);                                                  // head bias
+
+        juce::String json = "{\"architecture\":\"LSTM\",\"config\":{\"num_layers\":1,"
+                            "\"input_size\":1,\"hidden_size\":" + juce::String(hidden)
+                          + "},\"sample_rate\":48000,\"weights\":[";
+        for (size_t i = 0; i < weights.size(); ++i)
+            json += (i ? "," : "") + juce::String(weights[i], 6);
+        json += "]}";
+
+        const auto file = scratch.getChildFile("synthetic.nam");
+        file.deleteFile();
+        CHECK(file.replaceWithText(json));
+
+        VoxeraAudioProcessor n;
+        const auto loaded = n.loadNeuralModel(file);
+        std::cout << "NEURAL load: " << loaded.message << "\n";
+        CHECK(loaded.ok);
+        CHECK(n.hasNeuralModel());
+
+        set(n, "neuralMix", 100.0f);
+        for (const auto* id : { "pitchOn", "spectralOn", "spatialOn", "gateOn", "limiterOn" })
+            set(n, id, 0.0f);
+        set(n, "autoGain", 0.0f);
+        set(n, "satMix", 0.0f);
+        set(n, "smartEQAmount", 0.0f);
+        n.prepareToPlay(48000.0, 256);
+
+        juce::AudioBuffer<float> b(2, 256);
+        for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < 256; ++i) b.setSample(ch, i, 0.1f);
+        for (int block = 0; block < 40; ++block) n.processBlock(b, midi);
+
+        /*  Every gate is saturated, so after many steps each hidden unit sits at
+            tanh(1) and the head gives H * 0.5 * tanh(1) + 0.25.
+        */
+        const double expected = hidden * 0.5 * std::tanh(1.0) + 0.25;
+        const double got = b.getSample(0, 255);
+        std::cout << "NEURAL output: " << got << " expected about " << expected << "\n";
+        CHECK(std::abs(got - expected) < 0.05);
+
+        // A WaveNet capture has to be refused clearly rather than half-loaded.
+        const auto wave = scratch.getChildFile("wavenet.nam");
+        wave.deleteFile();
+        CHECK(wave.replaceWithText("{\"architecture\":\"WaveNet\",\"config\":{},\"weights\":[0]}"));
+        const auto refused = n.loadNeuralModel(wave);
+        CHECK(!refused.ok);
+        CHECK(refused.message.containsIgnoreCase("LSTM"));
+        std::cout << "NEURAL refusal: " << refused.message << "\n";
+        n.unloadNeuralModel();
+        CHECK(!n.hasNeuralModel());
+    }
+
     /*  Smart EQ inside the whole chain, not on its own.
 
         Its unit test passes, so if it seems to do nothing in use the cause is

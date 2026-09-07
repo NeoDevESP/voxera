@@ -165,6 +165,12 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
                        "afterwards, and the move can be undone.");
     savePreset.onClick = [this] { filePreset(true); };
     loadPreset.onClick = [this] { filePreset(false); };
+    loadModel.onClick = [this] { chooseNeuralModel(); };
+    loadModel.setTooltip("Loads a Neural Amp Modeler capture (.nam) or an RTNeural model (.json) "
+                         "and runs it where a preamp would sit. Captures of microphone preamps and "
+                         "console channels are what suit a voice. LSTM captures only: the WaveNet "
+                         "ones cost more CPU than this entire plugin. Nothing is bundled, so the "
+                         "capture is yours to provide or to make.");
     bypass.setClickingTogglesState(true);
     bypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.apvts, "bypass", bypass);
     lowLatency.setClickingTogglesState(true);
@@ -173,7 +179,8 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
                           "drops to under 5. Everything else keeps working; only the tuning "
                           "stops. Turn it off again to mix.");
     lowLatencyAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.apvts, "lowLatency", lowLatency);
-    for (auto* b : {&analyze, &autoMix, &savePreset, &loadPreset, &bypass, &lowLatency}) addAndMakeVisible(b);
+    for (auto* b : {&analyze, &autoMix, &savePreset, &loadPreset, &loadModel, &bypass, &lowLatency})
+        addAndMakeVisible(b);
     advancedEditor = std::make_unique<juce::GenericAudioProcessorEditor>(processor);
     advancedViewport.setViewedComponent(advancedEditor.get(), false);
     addAndMakeVisible(advancedViewport);
@@ -202,6 +209,7 @@ void VoxeraAudioProcessorEditor::selectPage(int page)
     for (auto& b : presets) b.setVisible(page == 2);
     analyze.setVisible(page == 0); autoMix.setVisible(page == 0);
     savePreset.setVisible(page == 2); loadPreset.setVisible(page == 2);
+    loadModel.setVisible(page == 2);
     advancedViewport.setVisible(page == 3);
     for (int i = 0; i < 6; ++i) tabs[static_cast<size_t>(i)].setToggleState(i == page, juce::dontSendNotification);
     resized(); repaint();
@@ -264,6 +272,7 @@ void VoxeraAudioProcessorEditor::resized()
     }
     for (int i = 0; i < 5; ++i) place(presets[static_cast<size_t>(i)], 138 + i * 187, 374, 174, 40);
     place(savePreset, 405, 440, 178, 34); place(loadPreset, 603, 440, 178, 34);
+    place(loadModel, 405, 484, 376, 32);
     place(bypass, 63, 644, 104, 54);
     place(lowLatency, 63, 706, 104, 34);
     place(advancedViewport, 92, 337, 1012, 172);
@@ -284,6 +293,42 @@ void VoxeraAudioProcessorEditor::timerCallback()
     analyze.setButtonText(running ? "ANALYZING " + juce::String(static_cast<int>(processor.captureProgress.load() * 100.0f)) + "%" : "ANALYZE VOICE");
     repaint();
 }
+void VoxeraAudioProcessorEditor::chooseNeuralModel()
+{
+    // Clicking with a capture already loaded removes it, so there is a way back
+    // without hunting for a file to replace it with.
+    if (processor.hasNeuralModel()) {
+        processor.unloadNeuralModel();
+        loadModel.setButtonText("LOAD NEURAL MODEL");
+        return;
+    }
+
+    chooser = std::make_unique<juce::FileChooser>(
+        "Load a neural capture",
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+        "*.nam;*.json");
+
+    chooser->launchAsync(juce::FileBrowserComponent::openMode
+                         | juce::FileBrowserComponent::canSelectFiles,
+        [this](const juce::FileChooser& fc) {
+            const auto file = fc.getResult();
+            if (file == juce::File{}) return;
+
+            const auto result = processor.loadNeuralModel(file);
+            if (!result.ok) {
+                juce::NativeMessageBox::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon, "VOXERA", result.message);
+                return;
+            }
+            loadModel.setButtonText(processor.neuralModelName().toUpperCase());
+            // Shown even on success: a mismatched sample rate loads perfectly
+            // well and still does not sound like the capture.
+            if (result.message.contains("trained at"))
+                juce::NativeMessageBox::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon, "VOXERA", result.message);
+        });
+}
+
 void VoxeraAudioProcessorEditor::filePreset(bool save)
 {
     chooser = std::make_unique<juce::FileChooser>(save ? "Save VOXERA preset" : "Load VOXERA preset",

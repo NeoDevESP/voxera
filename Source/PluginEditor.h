@@ -47,6 +47,8 @@ private:
     std::array<juce::TextButton, 5> presets;
     juce::TextButton analyze { "ANALYZE VOICE" }, savePreset { "SAVE PRESET" }, loadPreset { "LOAD PRESET" };
     juce::TextButton autoMix { "AUTO MIX (8s)" };
+    juce::TextButton loadModel { "LOAD NEURAL MODEL" };
+    void chooseNeuralModel();
     juce::TextButton bypass { "BYPASS" };
     juce::TextButton lowLatency { "LOW LATENCY" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;

@@ -35,6 +35,19 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(rubberband)
 
+# RTNeural runs the trained network. Its default Eigen backend is vendored in
+# the repository, so no submodules are needed; xsimd is a submodule and is left
+# alone deliberately, since fetching it would make the build depend on a second
+# host for no gain at the network sizes involved here.
+set(RTNEURAL_EIGEN ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    RTNeural
+    GIT_REPOSITORY https://github.com/jatinchowdhury18/RTNeural.git
+    GIT_TAG 95c3c0f987a6fe903e7eec71e797405dbed7caf7
+    GIT_SUBMODULES ""
+)
+FetchContent_MakeAvailable(RTNeural)
+
 juce_add_plugin(VOXERA
     COMPANY_NAME "Trevor Deey Labs"
     # The unique id a host uses is derived from these codes, so every build that
@@ -90,6 +103,7 @@ target_sources(VOXERA PRIVATE
     Source/DSP/Modulation.h
     Source/DSP/SoftClip.h
     Source/DSP/Character.h
+    Source/DSP/NeuralStage.h
     Source/DSP/AutoMix.h
     ${rubberband_SOURCE_DIR}/single/RubberBandSingle.cpp
 )
@@ -119,6 +133,11 @@ target_link_libraries(VOXERA
     PRIVATE
         juce::juce_audio_utils
         juce::juce_dsp
+        # Private, so RTNeural's own compile options and Eigen's definitions stay
+        # inside this target instead of reaching everything that links it. The
+        # test targets include NeuralStage.h through PluginProcessor.h, so they
+        # link RTNeural themselves rather than inheriting it from here.
+        RTNeural
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -134,14 +153,14 @@ if(VOXERA_BUILD_TESTS)
     add_test(NAME realtime_utilities COMMAND VOXERA_RealtimeTests)
     add_executable(VOXERA_DetectorBenchmark Tests/detector_benchmark.cpp)
     target_include_directories(VOXERA_DetectorBenchmark PRIVATE Tests/headers ${rubberband_SOURCE_DIR})
-    target_link_libraries(VOXERA_DetectorBenchmark PRIVATE VOXERA juce::juce_audio_utils juce::juce_dsp)
+    target_link_libraries(VOXERA_DetectorBenchmark PRIVATE VOXERA RTNeural juce::juce_audio_utils juce::juce_dsp)
     add_test(NAME detector_benchmark COMMAND VOXERA_DetectorBenchmark)
     foreach(testName IN ITEMS DSP Integration)
         string(TOLOWER ${testName} sourceName)
         add_executable(VOXERA_${testName}Tests Tests/${sourceName}_tests.cpp)
         target_include_directories(VOXERA_${testName}Tests PRIVATE Tests/headers ${rubberband_SOURCE_DIR})
         target_compile_definitions(VOXERA_${testName}Tests PRIVATE JucePlugin_Name="VOXERA")
-        target_link_libraries(VOXERA_${testName}Tests PRIVATE VOXERA juce::juce_audio_utils juce::juce_dsp)
+        target_link_libraries(VOXERA_${testName}Tests PRIVATE VOXERA RTNeural juce::juce_audio_utils juce::juce_dsp)
         add_test(NAME ${sourceName} COMMAND VOXERA_${testName}Tests "${CMAKE_CURRENT_BINARY_DIR}/test-previews")
     endforeach()
 endif()

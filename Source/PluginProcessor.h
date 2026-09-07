@@ -19,6 +19,7 @@
 #include "DSP/VocalLock.h"
 #include "DSP/Chop.h"
 #include "DSP/Modulation.h"
+#include "DSP/NeuralStage.h"
 #include "DSP/SoftClip.h"
 #include "DSP/Character.h"
 #include "DSP/AutoMix.h"
@@ -81,6 +82,19 @@ public:
         no synchronisation is needed here.
     */
     const juce::String& autoMixReport() const noexcept { return lastReport; }
+
+    /*  Loads a neural capture. Message thread only.
+
+        Audio is suspended across the swap. The audio thread holds a raw pointer
+        to the model while it runs, so the object behind it cannot be released
+        until that thread has certainly stopped reading it, and suspending is
+        the mechanism a plugin already has for saying so.
+    */
+    voxera::NeuralStage::LoadResult loadNeuralModel(const juce::File& file);
+    void unloadNeuralModel();
+    bool hasNeuralModel() const noexcept { return neural.hasModel(); }
+    juce::String neuralModelName() const { return neural.modelName(); }
+    const juce::File& neuralModelFile() const noexcept { return loadedNeuralFile; }
     std::atomic<float> captureProgress { 0.0f };
     std::atomic<bool> capturing { false }, profileReady { false };
     std::array<std::atomic<float>, 256> scope {};
@@ -186,6 +200,7 @@ private:
         std::atomic<float>* modDepth {};
         std::atomic<float>* modMix {};
         std::atomic<float>* glue {};
+        std::atomic<float>* neuralMix {};
     } prm;
 
     // The chain can report two different latencies. Both are worked out once in
@@ -229,11 +244,14 @@ private:
     voxera::Crush crush;
     voxera::Modulation modulation;
     voxera::Chop chop;
+    voxera::NeuralStage neural;
     voxera::Glue glue;
     voxera::SoftClip softClip;
     voxera::Limiter limiter;
 
     juce::String lastReport;
+    // Kept so the session can reopen with the same capture in place.
+    juce::File loadedNeuralFile;
     bool previousAnalyzeState = false;
     bool profileNeedsPublish = false;
 

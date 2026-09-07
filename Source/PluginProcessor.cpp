@@ -80,6 +80,7 @@ namespace ParamIDs
     static constexpr auto modDepth = "modDepth";
     static constexpr auto modMix = "modMix";
     static constexpr auto glue = "glue";
+    static constexpr auto neuralMix = "neuralMix";
 }
 
 VoxeraAudioProcessor::VoxeraAudioProcessor()
@@ -165,6 +166,41 @@ void VoxeraAudioProcessor::bindParameters()
     prm.modDepth = bind(ParamIDs::modDepth);
     prm.modMix = bind(ParamIDs::modMix);
     prm.glue = bind(ParamIDs::glue);
+    prm.neuralMix = bind(ParamIDs::neuralMix);
+}
+
+voxera::NeuralStage::LoadResult VoxeraAudioProcessor::loadNeuralModel(const juce::File& file)
+{
+    auto result = neural.load(file);
+    if (!result.ok) return result;
+
+    suspendProcessing(true);
+    neural.commitLoad();
+    neural.prepare(getSampleRate() > 0.0 ? getSampleRate() : 48000.0, getTotalNumOutputChannels());
+    suspendProcessing(false);
+
+    loadedNeuralFile = file;
+
+    /*  A capture is trained at one rate and behaves as a different circuit at
+        any other, because a recurrent network's state advances per sample and
+        not per second. Saying so is more use than silently sounding wrong.
+    */
+    const double session = getSampleRate();
+    if (result.modelSampleRate > 0.0 && session > 0.0
+        && std::abs(result.modelSampleRate - session) > 1.0)
+        result.message += " — trained at " + juce::String(result.modelSampleRate, 0)
+                        + " Hz, session is " + juce::String(session, 0)
+                        + " Hz, so it will not sound as captured.";
+
+    return result;
+}
+
+void VoxeraAudioProcessor::unloadNeuralModel()
+{
+    suspendProcessing(true);
+    neural.unload();
+    suspendProcessing(false);
+    loadedNeuralFile = {};
 }
 
 /*  Parameters are grouped so hosts and the advanced page show a structured tree
@@ -306,7 +342,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxeraAudioProcessor::create
             number(ParamIDs::modMix, "Mod Mix", { 0.0f, 100.0f, 0.1f }, 0.0f)),
 
         group("glue", "Glue",
-            number(ParamIDs::glue, "Glue", { 0.0f, 100.0f, 0.1f }, 0.0f)));
+            number(ParamIDs::glue, "Glue", { 0.0f, 100.0f, 0.1f }, 0.0f)),
+
+        group("neural", "Neural",
+            number(ParamIDs::neuralMix, "Neural Mix", { 0.0f, 100.0f, 0.1f }, 0.0f)));
 
     return layout;
 }
@@ -344,6 +383,7 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     crush.prepare(sampleRate, getTotalNumOutputChannels());
     modulation.prepare(sampleRate, getTotalNumOutputChannels());
     chop.prepare(sampleRate, getTotalNumOutputChannels());
+    neural.prepare(sampleRate, getTotalNumOutputChannels());
     glue.prepare(sampleRate, getTotalNumOutputChannels());
     softClip.prepare(sampleRate, getTotalNumOutputChannels());
     saturator.prepare(spec);
@@ -407,6 +447,7 @@ void VoxeraAudioProcessor::releaseResources()
     crush.reset();
     modulation.reset();
     chop.reset();
+    neural.reset();
     glue.reset();
     softClip.reset();
     limiter.reset();
@@ -684,6 +725,13 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     punch.setAmount(prm.punch->load() * 0.01f);
     punch.process(buffer);
 
+    /*  Before the saturator, in the place a preamp occupies on a real desk:
+        these captures are of the stage a microphone hits first, so anything
+        after it should be hearing what that stage produced.
+    */
+    neural.setMix(prm.neuralMix->load() * 0.01f);
+    neural.process(buffer);
+
     saturator.setDriveDb(prm.satDrive->load());
     saturator.setWarmth(prm.satWarmth->load() * 0.01f);
     saturator.setMix(prm.satMix->load() * 0.01f);
@@ -817,6 +865,11 @@ void VoxeraAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     saved.setProperty("confidence", profile.pitchConfidence, nullptr);
     saved.setProperty("range", profile.pitchRangeSemitones, nullptr);
     state.addChild(saved, -1, nullptr);
+    // The path rather than the weights: a capture is someone's file on disk, and
+    // copying it into every session that used it would be both wasteful and a
+    // way of redistributing it without meaning to.
+    if (loadedNeuralFile.existsAsFile())
+        state.setProperty("neuralModel", loadedNeuralFile.getFullPathName(), nullptr);
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     copyXmlToBinary(*xml, destData);
 }
@@ -862,6 +915,13 @@ void VoxeraAudioProcessor::setStateInformation(const void* data, int sizeInBytes
         }
         auto captureParameter = state.getChildWithProperty("id", "analyzeVoice");
         if (captureParameter.isValid()) captureParameter.setProperty("value", 0.0f, nullptr);
+        // Silently ignored when the file has moved or the session was written on
+        // another machine: the mix control is restored either way, so the worst
+        // case is a chain with that stage doing nothing rather than a failure.
+        if (const auto path = state.getProperty("neuralModel").toString(); path.isNotEmpty()) {
+            if (const juce::File file(path); file.existsAsFile()) loadNeuralModel(file);
+        }
+
         apvts.replaceState(state);
         publishedProfile.publish(p);
         pendingProfile.publish(p);
