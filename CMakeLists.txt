@@ -37,13 +37,19 @@ FetchContent_MakeAvailable(rubberband)
 
 juce_add_plugin(VOXERA
     COMPANY_NAME "Trevor Deey Labs"
-    BUNDLE_ID "com.trevordeey.voxera"
+    # Identity is deliberately different from 0.8's. A VST3's unique id is
+    # derived from these codes, so leaving PLUGIN_CODE as Vx01 would make a host
+    # treat this build as the same plugin as the frozen 0.8 and show only one of
+    # them. Changing it lets both sit in the rack at once, which is the point:
+    # 0.8 stays as the reference that sounds right, and this is what gets
+    # compared against it.
+    BUNDLE_ID "com.trevordeey.voxera1"
     PLUGIN_MANUFACTURER_CODE Tdly
-    PLUGIN_CODE Vx01
+    PLUGIN_CODE Vx10
     # AU is macOS-only and JUCE drops it elsewhere, but without it Logic Pro and
     # GarageBand cannot see the plugin at all: neither host loads VST3.
     FORMATS VST3 AU Standalone
-    PRODUCT_NAME "VOXERA"
+    PRODUCT_NAME "VOXERA1"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE

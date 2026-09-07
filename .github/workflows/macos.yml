@@ -23,7 +23,7 @@ jobs:
       - name: Confirm both architectures are present
         run: |
           set -euo pipefail
-          BIN="build-mac/VOXERA_artefacts/Release/VST3/VOXERA.vst3/Contents/MacOS/VOXERA"
+          BIN="build-mac/VOXERA_artefacts/Release/VST3/VOXERA1.vst3/Contents/MacOS/VOXERA1"
           lipo -archs "$BIN"
           # A missing slice is silent at build time and only shows up as "plugin
           # will not load" on the other kind of Mac, so it is failed here.
@@ -38,17 +38,19 @@ jobs:
           unzip -q pluginval.zip
           pluginval.app/Contents/MacOS/pluginval \
             --strictness-level 5 --skip-gui-tests --random-seed 12345 \
-            --validate "build-mac/VOXERA_artefacts/Release/VST3/VOXERA.vst3"
+            --validate "build-mac/VOXERA_artefacts/Release/VST3/VOXERA1.vst3"
 
       - name: Validate the Audio Unit with auval
         run: |
           set -euo pipefail
           mkdir -p ~/Library/Audio/Plug-Ins/Components
-          cp -R build-mac/VOXERA_artefacts/Release/AU/VOXERA.component ~/Library/Audio/Plug-Ins/Components/
+          cp -R build-mac/VOXERA_artefacts/Release/AU/VOXERA1.component ~/Library/Audio/Plug-Ins/Components/
           killall -9 AudioComponentRegistrar 2>/dev/null || true
           # Apple's own validator, and the gate Logic applies before it will
           # load a component at all.
-          auval -v aufx Vx01 Tdly
+          # Subtype must match PLUGIN_CODE in CMakeLists, which is Vx10 now that
+          # 0.8 keeps Vx01 so the two can coexist in a host.
+          auval -v aufx Vx10 Tdly
 
       - name: Package
         run: |
@@ -57,9 +59,9 @@ jobs:
           cd build-mac/VOXERA_artefacts/Release
           # ditto rather than zip: it preserves the bundle metadata and symlinks
           # that make a .component and a .vst3 loadable.
-          ditto -c -k --sequesterRsrc --keepParent VST3/VOXERA.vst3 ../../../artifacts/VOXERA-VST3.zip
-          ditto -c -k --sequesterRsrc --keepParent AU/VOXERA.component ../../../artifacts/VOXERA-AU.zip
-          ditto -c -k --sequesterRsrc --keepParent Standalone/VOXERA.app ../../../artifacts/VOXERA-Standalone.zip
+          ditto -c -k --sequesterRsrc --keepParent VST3/VOXERA1.vst3 ../../../artifacts/VOXERA-VST3.zip
+          ditto -c -k --sequesterRsrc --keepParent AU/VOXERA1.component ../../../artifacts/VOXERA-AU.zip
+          ditto -c -k --sequesterRsrc --keepParent Standalone/VOXERA1.app ../../../artifacts/VOXERA-Standalone.zip
 
       - name: Write install notes
         run: |
@@ -70,14 +72,14 @@ jobs:
           anything downloaded from the internet, so Gatekeeper will refuse to
           load them until that flag is removed. After unzipping:
 
-            xattr -dr com.apple.quarantine VOXERA.vst3
-            xattr -dr com.apple.quarantine VOXERA.component
-            xattr -dr com.apple.quarantine VOXERA.app
+            xattr -dr com.apple.quarantine VOXERA1.vst3
+            xattr -dr com.apple.quarantine VOXERA1.component
+            xattr -dr com.apple.quarantine VOXERA1.app
 
           Then copy them into place:
 
-            VOXERA.vst3       ->  ~/Library/Audio/Plug-Ins/VST3/
-            VOXERA.component  ->  ~/Library/Audio/Plug-Ins/Components/
+            VOXERA1.vst3       ->  ~/Library/Audio/Plug-Ins/VST3/
+            VOXERA1.component  ->  ~/Library/Audio/Plug-Ins/Components/
 
           Logic and GarageBand need the Audio Unit (.component); they do not
           load VST3. Logic caches its scan, so after installing run:

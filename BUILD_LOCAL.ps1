@@ -68,7 +68,7 @@ Invoke-WebRequest "https://github.com/Tracktion/pluginval/releases/download/v1.0
 Expand-Archive "build/pluginval.zip" -DestinationPath $validatorDir -Force
 $validator = Get-ChildItem $validatorDir -Filter pluginval.exe -Recurse | Select-Object -First 1
 if (-not $validator) { throw "pluginval.exe missing" }
-Invoke-Checked $validator.FullName @("--strictness-level", "5", "--skip-gui-tests", "--random-seed", "12345", "--validate", "$PSScriptRoot/build/VOXERA_artefacts/Release/VST3/VOXERA.vst3")
+Invoke-Checked $validator.FullName @("--strictness-level", "5", "--skip-gui-tests", "--random-seed", "12345", "--validate", "$PSScriptRoot/build/VOXERA_artefacts/Release/VST3/VOXERA1.vst3")
 
 if ($Package) {
     Invoke-Checked $iscc @("Installer/VOXERA.iss")
@@ -78,6 +78,6 @@ if ($Package) {
     Write-Host "Installer: $($installer.FullName)"
 } else {
     Write-Host ""
-    Write-Host "✅  VST3 listo: build/VOXERA_artefacts/Release/VST3/VOXERA.vst3"
+    Write-Host "✅  VST3 listo: build/VOXERA_artefacts/Release/VST3/VOXERA1.vst3"
     Write-Host 'Copia esa carpeta .vst3 a: C:\Program Files\Common Files\VST3\'
 }
