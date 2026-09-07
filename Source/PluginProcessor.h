@@ -31,7 +31,10 @@ public:
     static constexpr int numFactoryPresets = 5;
     // Bumped whenever parameters are added, so an older saved state is known to
     // need the missing-parameter pass in setStateInformation.
-    static constexpr int stateVersion = 3;
+    // 4: density, vocal lock, warmth, reverb tone, chop, crush, modulation and
+    // glue. Every addition has to bump this, or a session saved by the previous
+    // build loads without the pass that gives new parameters their defaults.
+    static constexpr int stateVersion = 4;
 
     VoxeraAudioProcessor();
     // Cancels here rather than relying on the base destructor: by the time

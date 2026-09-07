@@ -36,6 +36,7 @@ public:
     {
         gain = 1.0f;
         freeRunningStep = 0.0;
+        lastGiven = -1.0;
         amount.setCurrentAndTargetValue(amount.getTargetValue());
     }
 
@@ -44,8 +45,23 @@ public:
     void setDivision(int index) noexcept { division = juce::jlimit(0, numDivisions - 1, index); }
     void setPattern(int index) noexcept { pattern = juce::jlimit(0, numPatterns - 1, index); }
 
-    // ppq below zero means the host offered no transport position.
-    void setPosition(double ppqPosition) noexcept { ppq = ppqPosition; }
+    /*  ppq below zero means the host offered no transport position.
+
+        A repeated identical value is ignored rather than applied. The processor
+        splits a host buffer into chunks and reads the playhead once per chunk,
+        which returns the same position for all of them; assigning it each time
+        would rewind the phase this class advanced during the previous chunk and
+        replay the same window. It only shows up when the host's buffer is
+        larger than the prepared block size, which is exactly the case a test on
+        one block size never reaches.
+    */
+    void setPosition(double ppqPosition) noexcept
+    {
+        if (ppqPosition < 0.0) { ppq = -1.0; lastGiven = -1.0; return; }
+        if (ppqPosition == lastGiven) return;
+        lastGiven = ppqPosition;
+        ppq = ppqPosition;
+    }
 
     void process(juce::AudioBuffer<float>& buffer)
     {
@@ -103,7 +119,7 @@ private:
     };
 
     juce::SmoothedValue<float> amount;
-    double sr = 48000.0, tempo = 120.0, ppq = -1.0, freeRunningStep = 0.0;
+    double sr = 48000.0, tempo = 120.0, ppq = -1.0, lastGiven = -1.0, freeRunningStep = 0.0;
     float gain = 1.0f, edgeCoeff = 1.0f;
     int numChannels = 2, division = 1, pattern = 0;
 };

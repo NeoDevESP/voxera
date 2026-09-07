@@ -275,8 +275,11 @@ void VoxeraAudioProcessorEditor::timerCallback()
     outPeak = juce::jmax(processor.meters.peakDb.load(), outPeak - 1.3f);
     const bool running = processor.capturing.load();
     analyze.setEnabled(!running);
-    // The full reasoning does not fit on the panel, so it lives here.
-    if (const auto& report = processor.autoMixReport(); report.isNotEmpty())
+    // The full reasoning does not fit on the panel, so it lives here. Compared
+    // before assigning: this runs thirty times a second and the text changes
+    // only when an analysis finishes.
+    if (const auto& report = processor.autoMixReport();
+        report.isNotEmpty() && report != autoMix.getTooltip())
         autoMix.setTooltip(report);
     analyze.setButtonText(running ? "ANALYZING " + juce::String(static_cast<int>(processor.captureProgress.load() * 100.0f)) + "%" : "ANALYZE VOICE");
     repaint();

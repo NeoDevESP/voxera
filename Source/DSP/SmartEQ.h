@@ -121,22 +121,48 @@ private:
         exactly what a tilt does not explain, which is the definition of a
         prominence and the thing this stage is meant to remove.
     */
+    /*  Running total of the spectrum in decibels, one entry per bin.
+
+        The five bands read overlapping ranges — the two-octave trend around
+        4 kHz covers everything the 2 kHz band looks at — so evaluating them
+        directly meant taking the logarithm of some bins five times over. Built
+        once as a prefix sum, any range's total is the difference of two entries
+        and every bin is converted exactly once.
+    */
+    void buildSpectrumDb()
+    {
+        /*  Only as far up as any band actually reads.
+
+            The highest range in use is the two-octave trend around the top
+            band, so nothing above twice that frequency is ever looked at —
+            about a third of the transform at 48 kHz. Converting the whole
+            spectrum was measurably slower than the overlapping evaluation it
+            replaced, which is the sort of thing that only shows up when the
+            cost is measured rather than reasoned about.
+        */
+        const double highestHz = static_cast<double>(frequencies.back()) * 2.0;
+        const int needed = static_cast<int>(highestHz / spectrumBinHz) + 2;
+        const int bins = juce::jmin(juce::jmin(spectrumBinCount, needed),
+                                    static_cast<int>(prefixDb.size()) - 1);
+        prefixDb[0] = 0.0f;
+        for (int bin = 0; bin < bins; ++bin) {
+            const float magnitude = spectrum[bin] * spectrumScale;
+            prefixDb[static_cast<size_t>(bin) + 1] = prefixDb[static_cast<size_t>(bin)]
+                + 20.0f * std::log10(juce::jmax(1.0e-9f, magnitude));
+        }
+        prefixCount = bins;
+    }
+
     float spectralExcess(size_t b) const
     {
         const auto centre = static_cast<double>(frequencies[b]);
         const auto meanDb = [this](double lowHz, double highHz) {
             const int first = juce::jmax(1, static_cast<int>(lowHz / spectrumBinHz));
-            const int last = juce::jmin(spectrumBinCount - 1, static_cast<int>(highHz / spectrumBinHz));
+            const int last = juce::jmin(prefixCount - 1, static_cast<int>(highHz / spectrumBinHz));
             if (last <= first) return -160.0f;
-
-            double sum = 0.0;
-            int counted = 0;
-            for (int bin = first; bin <= last; ++bin) {
-                const float magnitude = spectrum[bin] * spectrumScale;
-                sum += 20.0 * std::log10(juce::jmax(1.0e-9f, magnitude));
-                ++counted;
-            }
-            return static_cast<float>(sum / juce::jmax(1, counted));
+            const int counted = last - first + 1;
+            return (prefixDb[static_cast<size_t>(last) + 1] - prefixDb[static_cast<size_t>(first)])
+                 / static_cast<float>(counted);
         };
 
         const float band = meanDb(centre * 0.891, centre * 1.122);   // a third of an octave
@@ -150,6 +176,7 @@ private:
         float sum = 0;
         // Power gate at -55 dBFS; no automatic boosts into silence or noise.
         if (totalPower > 3.162278e-6f && amount > 0) {
+            if (usingSpectrum()) buildSpectrumDb();
             for (size_t b = 0; b < targets.size(); ++b) {
                 if (frequencies[b] > sr * 0.3) continue;
                 const float excess = usingSpectrum() ? spectralExcess(b) : filterExcess(b);
@@ -192,6 +219,11 @@ private:
     static constexpr double detectorQ = 2.5;
     static constexpr float deadbandDb = 2.5f;   // below this it is tilt, not a fault
     static constexpr float slope = 1.0f;
+
+    // Sized for the 2048-point transform the spectral engine runs; a larger one
+    // is simply read up to this many bins rather than overrunning.
+    std::array<float, 1026> prefixDb {};
+    int prefixCount = 0;
 
     const float* spectrum = nullptr;
     int spectrumBinCount = 0;

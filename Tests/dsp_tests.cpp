@@ -530,6 +530,37 @@ void checkChopAndCrush()
     CHECK(quietest < 0.05f);
     std::cout << "Chop: loudest window " << loudest << ", quietest " << quietest << '\n';
 
+    /*  The processor splits a host buffer into chunks and reads the playhead
+        once per chunk, so the same position arrives several times for one
+        block. Applying it each time would rewind the phase advanced during the
+        previous chunk and replay the same window. Feeding four chunks with one
+        position has to give the same result as one call of the same total
+        length, which is what this asserts.
+    */
+    {
+        const int span = 8192;
+        voxera::Chop whole, split;
+        for (auto* c : { &whole, &split }) {
+            c->prepare(sr, 2); c->setTempo(120.0); c->setDivision(1);
+            c->setPattern(0); c->setAmount(1.0f);
+        }
+        juce::AudioBuffer<float> a(2, span), b(2, span);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < span; ++i) { a.setSample(ch, i, 0.4f); b.setSample(ch, i, 0.4f); }
+
+        whole.setPosition(4.0);
+        whole.process(a);
+
+        for (int part = 0; part < 4; ++part) {
+            split.setPosition(4.0);   // the same position, as the host reports it
+            float* ptr[]{ b.getWritePointer(0) + part * 2048, b.getWritePointer(1) + part * 2048 };
+            juce::AudioBuffer<float> chunk(ptr, 2, 2048);
+            split.process(chunk);
+        }
+        for (int i = 0; i < span; ++i)
+            CHECK(std::abs(a.getSample(0, i) - b.getSample(0, i)) < 1.0e-6f);
+    }
+
     // --- Crush ----------------------------------------------------------
     voxera::Crush off; off.prepare(sr, 2); off.setAmount(0.0f); off.setMix(0.0f);
     juce::AudioBuffer<float> dry(2, 4096), same(2, 4096);
