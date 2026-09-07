@@ -126,15 +126,23 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
     addControl("smartEQAmount", "AMOUNT %", 4);
     addControl("smartEQRange", "BUDGET dB", 4);
     addControl("smartEQResponse", "RESPONSE ms", 4);
-    const char* tabNames[] = {"VOCALS", "FX", "PRESETS", "MORE", "SMART EQ"};
-    for (int i = 0; i < 5; ++i) {
+    addControl("chopAmount", "CHOP", 5);
+    addControl("crush", "CRUSH", 5);
+    addControl("crushMix", "CRUSH MIX", 5);
+    addControl("modRate", "MOD RATE", 5);
+    addControl("modDepth", "MOD DEPTH", 5);
+    addControl("modMix", "MOD MIX", 5);
+    addControl("glue", "GLUE", 5);
+    const char* tabNames[] = {"VOCALS", "FX", "PRESETS", "MORE", "SMART EQ", "CHOP"};
+    for (int i = 0; i < 6; ++i) {
         auto& tab = tabs[static_cast<size_t>(i)];
         tab.setButtonText(tabNames[i]); tab.onClick = [this, i] { selectPage(i); };
         addAndMakeVisible(tab);
     }
-    const char* choiceIDs[] = {"pitchKey", "pitchScale", "pitchMode"};
-    const char* choiceNames[] = {"KEY", "SCALE", "MODE"};
-    for (int i = 0; i < 3; ++i) {
+    const char* choiceIDs[] = {"pitchKey", "pitchScale", "pitchMode",
+                               "chopDivision", "chopPattern", "modType"};
+    const char* choiceNames[] = {"KEY", "SCALE", "MODE", "RATE", "PATTERN", "MOD"};
+    for (int i = 0; i < 6; ++i) {
         auto& c = choices[static_cast<size_t>(i)];
         auto* param = dynamic_cast<juce::AudioParameterChoice*>(processor.apvts.getParameter(choiceIDs[i]));
         c.combo.addItemList(param->choices, 1); c.combo.setName(choiceNames[i]);
@@ -186,12 +194,16 @@ void VoxeraAudioProcessorEditor::selectPage(int page)
         const bool visible = c->page < 0 || c->page == page;
         c->slider.setVisible(visible); c->label.setVisible(visible);
     }
-    for (auto& c : choices) { c.combo.setVisible(page == 0); c.label.setVisible(page == 0); }
+    // The first three selectors belong to VOCALS, the last three to CHOP.
+    for (size_t i = 0; i < choices.size(); ++i) {
+        const bool visible = (i < 3) ? (page == 0) : (page == 5);
+        choices[i].combo.setVisible(visible); choices[i].label.setVisible(visible);
+    }
     for (auto& b : presets) b.setVisible(page == 2);
     analyze.setVisible(page == 0); autoMix.setVisible(page == 0);
     savePreset.setVisible(page == 2); loadPreset.setVisible(page == 2);
     advancedViewport.setVisible(page == 3);
-    for (int i = 0; i < 5; ++i) tabs[static_cast<size_t>(i)].setToggleState(i == page, juce::dontSendNotification);
+    for (int i = 0; i < 6; ++i) tabs[static_cast<size_t>(i)].setToggleState(i == page, juce::dontSendNotification);
     resized(); repaint();
 }
 void VoxeraAudioProcessorEditor::resized()
@@ -200,7 +212,31 @@ void VoxeraAudioProcessorEditor::resized()
     auto place = [scale](juce::Component& c, int x, int y, int w, int h) {
         c.setBounds((juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y), static_cast<float>(w), static_cast<float>(h)) * scale).toNearestInt());
     };
-    for (int i = 0; i < 5; ++i) place(tabs[static_cast<size_t>(i)], 310 + i * 115, 87, 105, 30);
+    // Six tabs now, so they are narrower and start further left. The row must
+    // end before the OUT meter, which owns the panel from x=1000.
+    for (int i = 0; i < 6; ++i) place(tabs[static_cast<size_t>(i)], 285 + i * 106, 87, 98, 30);
+
+    /*  CHOP page. The three selectors sit on the left where VOCALS puts its
+        pitch selectors, and the seven knobs fill the rest of the panel in two
+        rows, clear of the y=124 meter strip above and the y=548 divider below.
+    */
+    for (int i = 0; i < 3; ++i) {
+        auto& c = choices[static_cast<size_t>(3 + i)];
+        place(c.label, 98 + i * 160, 350, 150, 20);
+        place(c.combo, 98 + i * 160, 382, 148, 32);
+    }
+    for (int i = 0; i < 4; ++i) {
+        auto& c = *controls[static_cast<size_t>(17 + i)];
+        place(c.label, 600 + i * 130, 350, 112, 22);
+        place(c.slider, 600 + i * 130, 384, 112, 100);
+    }
+    for (int i = 0; i < 3; ++i) {
+        auto& c = *controls[static_cast<size_t>(21 + i)];
+        // The dark panel ends near y=520; a taller row puts the value boxes out
+        // over the bezel.
+        place(c.label, 98 + i * 160, 414, 150, 20);
+        place(c.slider, 98 + i * 160, 436, 150, 82);
+    }
     for (int i = 0; i < 5; ++i) {
         auto& c = *controls[static_cast<size_t>(i)];
         place(c.label, 195 + i * 176, 560, 146, 26);

@@ -42,25 +42,25 @@ ctest --test-dir build-mac -C Release --output-on-failure
 ARTEFACTS="build-mac/VOXERA_artefacts/Release"
 echo
 echo "Built:"
-for item in "$ARTEFACTS/VST3/VOXERA1.vst3" "$ARTEFACTS/AU/VOXERA1.component" "$ARTEFACTS/Standalone/VOXERA1.app"; do
+for item in "$ARTEFACTS/VST3/VOXERA+CHOP.vst3" "$ARTEFACTS/AU/VOXERA+CHOP.component" "$ARTEFACTS/Standalone/VOXERA+CHOP.app"; do
     [[ -e "$item" ]] && echo "  $item"
 done
 
 # A universal binary carries both slices; if one is missing the other machine
 # silently cannot load the plugin, so it is worth confirming here.
-if [[ -e "$ARTEFACTS/VST3/VOXERA1.vst3/Contents/MacOS/VOXERA1" ]]; then
+if [[ -e "$ARTEFACTS/VST3/VOXERA+CHOP.vst3/Contents/MacOS/VOXERA+CHOP" ]]; then
     echo
     echo "Architectures:"
-    lipo -archs "$ARTEFACTS/VST3/VOXERA1.vst3/Contents/MacOS/VOXERA1"
+    lipo -archs "$ARTEFACTS/VST3/VOXERA+CHOP.vst3/Contents/MacOS/VOXERA+CHOP"
 fi
 
 if [[ $INSTALL -eq 1 ]]; then
     mkdir -p ~/Library/Audio/Plug-Ins/VST3 ~/Library/Audio/Plug-Ins/Components
-    rm -rf ~/Library/Audio/Plug-Ins/VST3/VOXERA1.vst3
-    rm -rf ~/Library/Audio/Plug-Ins/Components/VOXERA1.component
-    cp -R "$ARTEFACTS/VST3/VOXERA1.vst3" ~/Library/Audio/Plug-Ins/VST3/
-    [[ -e "$ARTEFACTS/AU/VOXERA1.component" ]] && \
-        cp -R "$ARTEFACTS/AU/VOXERA1.component" ~/Library/Audio/Plug-Ins/Components/
+    rm -rf ~/Library/Audio/Plug-Ins/VST3/VOXERA+CHOP.vst3
+    rm -rf ~/Library/Audio/Plug-Ins/Components/VOXERA+CHOP.component
+    cp -R "$ARTEFACTS/VST3/VOXERA+CHOP.vst3" ~/Library/Audio/Plug-Ins/VST3/
+    [[ -e "$ARTEFACTS/AU/VOXERA+CHOP.component" ]] && \
+        cp -R "$ARTEFACTS/AU/VOXERA+CHOP.component" ~/Library/Audio/Plug-Ins/Components/
     echo
     echo "Installed to ~/Library/Audio/Plug-Ins/"
     echo

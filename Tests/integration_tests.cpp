@@ -138,6 +138,55 @@ int main(int argc, char** argv)
     }
     // Measured both ways at each rate, because the difference between them is
     // the pitch shifter's share of the bill and nothing else changes.
+    /*  Smart EQ inside the whole chain, not on its own.
+
+        Its unit test passes, so if it seems to do nothing in use the cause is
+        upstream: Vocal Lock and the spectral engine both remove low-mid
+        emphasis, and what they take out is no longer there for this stage to
+        find. Measuring it alone and then again with those running is what
+        separates "broken" from "already handled".
+    */
+    {
+        const auto resonantCut = [&](bool upstreamActive) {
+            VoxeraAudioProcessor p;
+            set(p, "smartEQAmount", 100.0f);
+            set(p, "smartEQRange", 6.0f);
+            set(p, "smartEQResponse", 100.0f);
+            set(p, "pitchOn", 0.0f);
+            set(p, "spectralOn", upstreamActive ? 1.0f : 0.0f);
+            set(p, "vocalLock", upstreamActive ? 80.0f : 0.0f);
+            set(p, "gateOn", 0.0f);
+            p.prepareToPlay(48000.0, 512);
+
+            // Two seconds of a voice-like tone with a heavy 1 kHz resonance on
+            // top, which is exactly what this stage exists to find.
+            for (int block = 0; block < 188; ++block) {
+                juce::AudioBuffer<float> b(2, 512);
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < 512; ++i) {
+                        const auto t = static_cast<float>(block * 512 + i) / 48000.0f;
+                        b.setSample(ch, i, 0.12f * std::sin(juce::MathConstants<float>::twoPi * 220.0f * t)
+                                         + 0.35f * std::sin(juce::MathConstants<float>::twoPi * 1000.0f * t));
+                    }
+                p.processBlock(b, midi);
+            }
+            return p.smartEQGain(2);   // the 1 kHz band
+        };
+
+        const float alone = resonantCut(false);
+        const float withUpstream = resonantCut(true);
+        std::cout << "SMART EQ 1 kHz cut: " << alone << " dB alone, "
+                  << withUpstream << " dB with Vocal Lock and spectral engine\n";
+
+        /*  A guard against the stage going quietly useless again. It once cut
+            0.74 dB here with the budget set to six, which measured as working
+            and was inaudible. Anything under two decibels on a resonance this
+            blatant means the detector has stopped separating bands.
+        */
+        CHECK(alone < -2.0f);
+        CHECK(withUpstream < -2.0f);
+    }
+
     for (const auto rate : { 48000.0, 96000.0 }) {
         const double full = measureCost(rate, 128, false);
         const double bypassed = measureCost(rate, 128, true);
@@ -200,7 +249,7 @@ int main(int argc, char** argv)
         }
     }
     CHECK(checkedAttachment && checkedEQAttachment);
-    for (const auto& name : {"VOCALS", "FX", "PRESETS", "MORE", "SMART EQ"}) {
+    for (const auto& name : {"VOCALS", "FX", "PRESETS", "MORE", "SMART EQ", "CHOP"}) {
         for (auto* child : editor->getChildren()) if (auto* button = dynamic_cast<juce::TextButton*>(child))
             if (button->getButtonText() == name) button->onClick();
         if (juce::String(name) == "SMART EQ") {

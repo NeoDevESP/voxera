@@ -41,8 +41,9 @@ private:
     VoxeraLookAndFeel theme;
     juce::TooltipWindow tooltips { this, 600 };
     std::vector<std::unique_ptr<Control>> controls;
-    std::array<Choice, 3> choices;
-    std::array<juce::TextButton, 5> tabs;
+    // Six: the three pitch selectors on VOCALS, and three more on CHOP.
+    std::array<Choice, 6> choices;
+    std::array<juce::TextButton, 6> tabs;
     std::array<juce::TextButton, 5> presets;
     juce::TextButton analyze { "ANALYZE VOICE" }, savePreset { "SAVE PRESET" }, loadPreset { "LOAD PRESET" };
     juce::TextButton autoMix { "AUTO MIX (8s)" };

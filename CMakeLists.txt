@@ -49,7 +49,11 @@ juce_add_plugin(VOXERA
     # AU is macOS-only and JUCE drops it elsewhere, but without it Logic Pro and
     # GarageBand cannot see the plugin at all: neither host loads VST3.
     FORMATS VST3 AU Standalone
-    PRODUCT_NAME "VOXERA1"
+    # Renamed from VOXERA1, but PLUGIN_CODE stays Vx10 on purpose: the unique id
+    # is derived from that, so keeping it means a host updates the entry it
+    # already has instead of listing a third plugin. The old VOXERA1.vst3 file
+    # has to be deleted on install, or two files would claim the same id.
+    PRODUCT_NAME "VOXERA+CHOP"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE

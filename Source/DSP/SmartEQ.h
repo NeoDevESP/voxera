@@ -14,7 +14,7 @@ public:
         channelCount = juce::jlimit(1, 2, channels);
         for (size_t i = 0; i < detectors.size(); ++i) {
             detectors[i].prepare(sr, channelCount);
-            detectors[i].setBandPass(125.0 * std::pow(2.0, static_cast<double>(i)), 1.0);
+            detectors[i].setBandPass(125.0 * std::pow(2.0, static_cast<double>(i)), detectorQ);
         }
         for (auto& f : filters) f.prepare(sr, channelCount);
         interval = juce::jmax(1, static_cast<int>(std::round(sr * 0.005)));
@@ -76,7 +76,7 @@ private:
                 auto db = [this](size_t i) { return 10.0f * std::log10(juce::jmax(1.0e-16f, powers[i])); };
                 // Log-frequency curvature: a broad spectral tilt is not a fault.
                 const float excess = db(b + 1) - 0.5f * (db(b) + db(b + 2));
-                targets[b] = amount * juce::jlimit(0.0f, budget, (excess - 4.0f) * 0.75f);
+                targets[b] = amount * juce::jlimit(0.0f, budget, (excess - deadbandDb) * slope);
                 sum += targets[b];
             }
         }
@@ -97,6 +97,25 @@ private:
             displayedGains[b].store(gains[b], std::memory_order_relaxed);
         }
     }
+    /*  How sharply a band has to stand out before it counts as a resonance.
+
+        The detectors sit an octave apart, so their width decides how much of a
+        neighbour's energy leaks into a band's own measurement. At Q=1 a tone one
+        octave away still reads only about 5 dB down, which means even a pure
+        sine could never show more than roughly 5 dB of excess — and after the
+        deadband and slope below, that left less than a decibel of correction
+        available no matter how the controls were set. The stage measured as
+        working and was inaudible, which is the same thing as not working.
+
+        At Q=2.5 that neighbour falls near 12 dB instead, so a real resonance
+        registers as one and the budget the user set becomes reachable. Narrower
+        still would start missing the broad, gentle humps that a room puts on a
+        voice, which are exactly what this is for.
+    */
+    static constexpr double detectorQ = 2.5;
+    static constexpr float deadbandDb = 2.5f;   // below this it is tilt, not a fault
+    static constexpr float slope = 1.0f;
+
     double sr = 48000;
     int channelCount = 2, interval = 240, countdown = 0;
     float amount = 0, budget = 3, response = 250, totalPower = 0, energyCoefficient = 0;
