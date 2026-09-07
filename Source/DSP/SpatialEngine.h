@@ -4,6 +4,7 @@
 #include "DuckingDelay.h"
 #include "FDNReverb.h"
 #include "Biquad.h"
+#include <array>
 #include <cmath>
 
 class SpatialEngine
@@ -16,8 +17,14 @@ public:
         bypassBlend.setCurrentAndTargetValue(enabled ? 1.0f : 0.0f);
         numChannels = juce::jlimit(1, 2, channels);
 
-        doubleLeft.prepare(sr, 0.080);
-        doubleRight.prepare(sr, 0.080);
+        doubler.prepare(sr, 0.080);
+        for (size_t v = 0; v < numDoubleVoices; ++v) {
+            doubleVoices[v].increment =
+                juce::MathConstants<double>::twoPi * doubleVoices[v].rateHz / sr;
+            // Spread the starting phases too, so the voices are already apart
+            // at the first sample instead of converging out of a shared start.
+            doublePhase[v] = juce::MathConstants<double>::twoPi * static_cast<double>(v) / numDoubleVoices;
+        }
 
         delay.prepare(sr);
         reverb.prepare(sr);
@@ -47,8 +54,6 @@ public:
         envAttack = std::exp(-1.0f / static_cast<float>(0.005 * sr));
         envRelease = std::exp(-1.0f / static_cast<float>(0.140 * sr));
 
-        phaseL = 0.0;
-        phaseR = 0.37;
         envelope = 0.0f;
 
         reset();
@@ -57,8 +62,9 @@ public:
     void reset()
     {
         bypassBlend.setCurrentAndTargetValue(enabled ? 1.0f : 0.0f);
-        doubleLeft.reset();
-        doubleRight.reset();
+        doubler.reset();
+        for (size_t v = 0; v < numDoubleVoices; ++v)
+            doublePhase[v] = juce::MathConstants<double>::twoPi * static_cast<double>(v) / numDoubleVoices;
         delay.reset();
         reverb.reset();
         doubleHP.reset();
@@ -139,8 +145,6 @@ public:
         auto* leftOut = buffer.getWritePointer(0);
         auto* rightOut = channels > 1 ? buffer.getWritePointer(1) : nullptr;
 
-        const double incL = juce::MathConstants<double>::twoPi * 0.17 / sr;
-        const double incR = juce::MathConstants<double>::twoPi * 0.23 / sr;
 
         for (int i = 0; i < buffer.getNumSamples(); ++i)
         {
@@ -159,24 +163,36 @@ public:
             const float wetDuck = juce::Decibels::decibelsToGain(duckDb);
 
             // ---------------- Modulated doubler ----------------
-            doubleLeft.push(mono);
-            doubleRight.push(mono);
+            // One line, read at every voice's tap: they are all copies of the
+            // same mono signal, so a second buffer would hold identical data.
+            doubler.push(mono);
 
-            const float modLms = 13.7f + 1.65f * static_cast<float>(std::sin(phaseL));
-            const float modRms = 21.3f + 2.15f * static_cast<float>(std::sin(phaseR));
+            float dblL = 0.0f, dblR = 0.0f;
+            for (size_t v = 0; v < numDoubleVoices; ++v)
+            {
+                const auto& voice = doubleVoices[v];
+                auto& phase = doublePhase[v];
 
-            float dblL = doubleLeft.read(doubleLeft.msToSamples(modLms));
-            float dblR = doubleRight.read(doubleRight.msToSamples(modRms));
+                const float ms = voice.baseMs + voice.depthMs * static_cast<float>(std::sin(phase));
+                const float tap = doubler.read(doubler.msToSamples(ms));
+
+                // Equal-power pan from a position in [-1, 1].
+                const float angle = 0.25f * juce::MathConstants<float>::pi * (voice.pan + 1.0f);
+                dblL += tap * std::cos(angle);
+                dblR += tap * std::sin(angle);
+
+                phase += voice.increment;
+                if (phase >= juce::MathConstants<double>::twoPi)
+                    phase -= juce::MathConstants<double>::twoPi;
+            }
+
+            dblL *= doubleNormalise;
+            dblR *= doubleNormalise;
 
             dblL = doubleHP.processSample(0, dblL);
             dblR = doubleHP.processSample(1, dblR);
             dblL = doubleLP.processSample(0, dblL);
             dblR = doubleLP.processSample(1, dblR);
-
-            phaseL += incL;
-            phaseR += incR;
-            if (phaseL >= juce::MathConstants<double>::twoPi) phaseL -= juce::MathConstants<double>::twoPi;
-            if (phaseR >= juce::MathConstants<double>::twoPi) phaseR -= juce::MathConstants<double>::twoPi;
 
             // ---------------- Tempo-synchronised ping-pong delay ----------------
             float delL = 0.0f, delR = 0.0f;
@@ -234,7 +250,40 @@ private:
     double tempo = 120.0;
     int division = 1;
 
-    FractionalDelay doubleLeft, doubleRight;
+    /*  Six voices rather than two.
+
+        A two-voice doubler is heard as two takes: the ear locates each copy and
+        counts them. Past about four decorrelated copies it stops being able to,
+        and the same processing reads as one wide, thick voice instead — which
+        is the effect that is wanted, and why it has to be subtle to work.
+
+        Everything below 30 ms stays inside the window where a delayed copy
+        fuses with the original instead of being heard as an echo.
+
+        The rates are the part that matters most. Any two LFOs whose rates form
+        a simple ratio drift into alignment periodically, and when several
+        copies swing together the result pulses audibly. These are all primes
+        over a hundred, so no two ever line up and the movement stays as a
+        texture rather than becoming an event.
+    */
+    struct DoubleVoice { float baseMs, depthMs, rateHz, pan; double increment; };
+
+    static constexpr size_t numDoubleVoices = 6;
+    std::array<DoubleVoice, numDoubleVoices> doubleVoices { {
+        //  base   depth   rate   pan
+        {   11.3f,  1.4f,  0.19f, -1.00f, 0.0 },
+        {   17.9f,  1.9f,  0.31f,  0.70f, 0.0 },
+        {   23.1f,  1.5f,  0.23f, -0.60f, 0.0 },
+        {   14.7f,  2.2f,  0.41f,  1.00f, 0.0 },
+        {   27.3f,  1.7f,  0.29f, -0.35f, 0.0 },
+        {   20.5f,  2.0f,  0.37f,  0.40f, 0.0 }
+    } };
+    std::array<double, numDoubleVoices> doublePhase {};
+    // Incoherent sources sum in power, so this keeps six of them at the level
+    // the two-voice version delivered rather than three times it.
+    static constexpr float doubleNormalise = 0.577f;   // 1 / sqrt(3)
+
+    FractionalDelay doubler;
     DuckingDelay delay;
     void applyReverbTone()
     {
@@ -256,7 +305,6 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> spaceAmount;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> duckAmount;
 
-    double phaseL = 0.0, phaseR = 0.37;
     float envelope = 0.0f;
     float envAttack = 0.99f, envRelease = 0.999f;
 };

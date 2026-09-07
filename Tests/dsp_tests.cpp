@@ -483,6 +483,65 @@ void checkUpward()
     std::cout << "PASS: upward compression raises quiet detail, spares loud and noise\n";
 }
 
+void checkDoubler()
+{
+    constexpr double sr = 48000.0;
+    const int length = static_cast<int>(sr * 3.0);   // long enough for the slowest LFO
+
+    const auto run = [&](float amount) {
+        SpatialEngine s; s.prepare(sr, 2);
+        s.setDouble(amount); s.setDelay(0.0f); s.setSpace(0.0f);
+        s.setWidth(0.5f); s.setDuck(0.0f);
+        juce::AudioBuffer<float> b(2, length);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < length; ++i)
+                b.setSample(ch, i, sine(220.0, i, sr, 0.25f) + sine(660.0, i, sr, 0.12f));
+        s.process(b);
+        return b;
+    };
+
+    const auto dry = run(0.0f);
+    const auto wide = run(1.0f);
+
+    // Side energy is what "wide" means: identical channels have none.
+    const auto sideRms = [](const juce::AudioBuffer<float>& b) {
+        double sum = 0.0;
+        for (int i = 0; i < b.getNumSamples(); ++i) {
+            const double side = 0.5 * (b.getSample(0, i) - b.getSample(1, i));
+            sum += side * side;
+        }
+        return std::sqrt(sum / b.getNumSamples());
+    };
+    const auto monoRms = [](const juce::AudioBuffer<float>& b) {
+        double sum = 0.0;
+        for (int i = 0; i < b.getNumSamples(); ++i) {
+            const double mid = 0.5 * (b.getSample(0, i) + b.getSample(1, i));
+            sum += mid * mid;
+        }
+        return std::sqrt(sum / b.getNumSamples());
+    };
+
+    const double drySide = sideRms(dry), wideSide = sideRms(wide);
+    const double dryMono = monoRms(dry), wideMono = monoRms(wide);
+
+    std::cout << "Doubler: side " << drySide << " -> " << wideSide
+              << ", mono sum " << dryMono << " -> " << wideMono << '\n';
+
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < length; ++i) CHECK(std::isfinite(wide.getSample(ch, i)));
+
+    CHECK(wideSide > drySide * 4.0);   // it genuinely widens
+
+    /*  The failure mode a doubler has to be checked for is mono collapse. Every
+        voice is a delayed copy of the same signal, so summing to mono combs
+        them against the original, and a badly chosen set of delays can cancel
+        most of the level. Anyone listening on a phone speaker hears that and
+        nothing else.
+    */
+    CHECK(wideMono > dryMono * 0.7);
+    std::cout << "PASS: doubler widens without collapsing when summed to mono\n";
+}
+
 void checkWarmth()
 {
     constexpr double sr = 48000.0;
@@ -657,7 +716,7 @@ int main() {
     std::cout << "PASS: module bypass fades, spectral partitioning, tempo delay\n";
     checkLimiter(); checkExciter(); checkPunch();
     checkGate(); checkSoftClip(); checkOptical(); checkCharacter();
-    checkUpward(); checkWarmth(); checkVocalLock(); checkAutoMix();
+    checkUpward(); checkWarmth(); checkDoubler(); checkVocalLock(); checkAutoMix();
     for (double sr : {44100.0, 48000.0, 96000.0}) {
         for (float hz : {80.0f, 110.0f, 220.0f, 440.0f, 880.0f}) {
             YinPitchDetector yin; yin.prepare(sr);
