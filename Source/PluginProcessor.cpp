@@ -623,6 +623,22 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     spectralEngine.setDeEss(deEss);
     spectralEngine.setAirDb(airDb);
     spectralEngine.process(buffer);
+    /*  The spectral engine's transform is handed straight to the Smart EQ.
+
+        It was being computed and thrown away, while the stage immediately after
+        it estimated the same spectrum with a bank of filters. The frame is of
+        the spectral engine's input rather than its output, so what the Smart EQ
+        reads is the spectrum before that stage corrected anything; both are
+        cut-only and share a budget the user sets, so the worst case is that the
+        two together take a little more out of a resonance than either would
+        alone, which is what a listener wants from a resonance in the first
+        place.
+    */
+    smartEQ.useSpectrum(spectralEngine.analysisMagnitudes(),
+                        AdaptiveSpectralEngine::analysisBinCount,
+                        spectralEngine.analysisBinHz(),
+                        spectralEngine.analysisScale(),
+                        spectralEngine.analysisFrame());
     smartEQ.setParameters(prm.smartEQAmount->load() * 0.01f,
         prm.smartEQRange->load(), prm.smartEQResponse->load());
     smartEQ.process(buffer);

@@ -149,6 +149,26 @@ public:
         }
     }
 
+    /*  The magnitudes from the most recent analysis frame, so a later stage can
+        read the spectrum instead of estimating one of its own.
+
+        This transform is already being computed and then discarded; anything
+        downstream that needs to know the shape of the spectrum was previously
+        approximating it with filters. Sharing costs nothing.
+
+        Two things the caller has to know. The frame is of this engine's INPUT,
+        taken before its own filters are applied, so a reader placed after it
+        sees the spectrum as it was before this stage corrected anything. And
+        it is only valid on the audio thread between process calls — there is no
+        synchronisation here because both stages run in sequence on that thread.
+    */
+    static constexpr int analysisBinCount = spectrumBins;
+    const float* analysisMagnitudes() const noexcept { return fftData.data(); }
+    double analysisBinHz() const noexcept { return sr / static_cast<double>(fftSize); }
+    // Increments on each new frame, so a reader can tell fresh data from stale.
+    uint32_t analysisFrame() const noexcept { return frameCounter; }
+    float analysisScale() const noexcept { return 1.0f / static_cast<float>(fftSize); }
+
     std::atomic<float> detectedResonance1Hz { 0.0f };
     std::atomic<float> detectedResonance2Hz { 0.0f };
     std::atomic<float> resonance1Score { 0.0f };
@@ -203,6 +223,7 @@ private:
 
         std::fill(fftData.begin() + fftSize, fftData.end(), 0.0f);
         fft.performFrequencyOnlyForwardTransform(fftData.data(), true);
+        ++frameCounter;
 
         const float rms = static_cast<float>(std::sqrt(timeEnergy / static_cast<double>(fftSize)));
         latestVoiceEnergy = juce::Decibels::gainToDecibels(rms, -120.0f);
@@ -513,6 +534,7 @@ private:
     std::array<float, fftSize> window {};
     std::array<float, fftSize> ring {};
     std::array<float, fftSize * 2> fftData {};
+    uint32_t frameCounter = 0;
     std::array<float, spectrumBins> spectrumDb {};
 
     int writeIndex = 0;

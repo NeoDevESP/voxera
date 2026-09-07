@@ -170,13 +170,23 @@ int main(int argc, char** argv)
                     }
                 p.processBlock(b, midi);
             }
+            // Report every band, not just the one under test: the budget is
+            // shared, so a smaller figure on 1 kHz can mean the detector found
+            // something else worth cutting rather than that it went deaf.
+            std::cout << "   bands:";
+            float total = 0.0f;
+            for (size_t band = 0; band < 5; ++band) {
+                std::cout << " " << juce::String(p.smartEQGain(band), 2).toStdString();
+                total -= p.smartEQGain(band);
+            }
+            std::cout << "   total " << total << " dB\n";
             return p.smartEQGain(2);   // the 1 kHz band
         };
 
+        std::cout << "SMART EQ, alone:\n";
         const float alone = resonantCut(false);
+        std::cout << "SMART EQ, with Vocal Lock and spectral engine:\n";
         const float withUpstream = resonantCut(true);
-        std::cout << "SMART EQ 1 kHz cut: " << alone << " dB alone, "
-                  << withUpstream << " dB with Vocal Lock and spectral engine\n";
 
         /*  A guard against the stage going quietly useless again. It once cut
             0.74 dB here with the budget set to six, which measured as working

@@ -34,6 +34,29 @@ public:
         budget = juce::jlimit(1.0f, 6.0f, budgetDb);
         response = juce::jlimit(100.0f, 1000.0f, responseMs);
     }
+
+    /*  Hands this stage the spectrum another one already computed.
+
+        Measuring prominence from a real spectrum is a different thing from
+        inferring it from three octave-spaced band powers. The band-power route
+        forces a choice that has no good answer: narrow detectors separate
+        neighbouring bands but miss the broad, gentle humps a room puts on a
+        voice, and wide ones see those humps but let every neighbour leak in.
+        Against an actual spectral envelope there is nothing to trade off — a
+        prominence is however far a region rises above the smooth trend through
+        it, whatever its width.
+
+        Called before process. Passing nothing leaves the stage on its own
+        filters, so it still works standalone and in its own tests.
+    */
+    void useSpectrum(const float* magnitudes, int bins, double binHz, float scale, uint32_t frame)
+    {
+        spectrum = magnitudes;
+        spectrumBinCount = bins;
+        spectrumBinHz = binHz;
+        spectrumScale = scale;
+        spectrumFrame = frame;
+    }
     float gainDb(size_t band) const noexcept { return displayedGains[band].load(std::memory_order_relaxed); }
     void process(juce::AudioBuffer<float>& buffer)
     {
@@ -48,13 +71,19 @@ public:
                 power += input[static_cast<size_t>(c)] * input[static_cast<size_t>(c)] / channels;
             }
             totalPower = energyCoefficient * totalPower + (1.0f - energyCoefficient) * power;
-            for (size_t b = 0; b < detectors.size(); ++b) {
-                float energy = 0;
-                for (int c = 0; c < channels; ++c) {
-                    const float y = detectors[b].processSample(c, input[static_cast<size_t>(c)]);
-                    energy += y * y / channels;
+
+            // Seven band-pass filters on every channel of every sample, purely
+            // to estimate a spectrum. When a real one has been supplied that is
+            // work with no reader, so it is skipped.
+            if (!usingSpectrum()) {
+                for (size_t b = 0; b < detectors.size(); ++b) {
+                    float energy = 0;
+                    for (int c = 0; c < channels; ++c) {
+                        const float y = detectors[b].processSample(c, input[static_cast<size_t>(c)]);
+                        energy += y * y / channels;
+                    }
+                    powers[b] = energyCoefficient * powers[b] + (1.0f - energyCoefficient) * energy;
                 }
-                powers[b] = energyCoefficient * powers[b] + (1.0f - energyCoefficient) * energy;
             }
             if (--countdown <= 0) { update(); countdown = interval; }
             for (int c = 0; c < channels; ++c) {
@@ -65,6 +94,56 @@ public:
         }
     }
 private:
+    bool usingSpectrum() const noexcept
+    {
+        return spectrum != nullptr && spectrumBinCount > 8 && spectrumBinHz > 0.0;
+    }
+
+    // The original estimate, kept for when no spectrum is supplied: three
+    // octave-spaced band powers, and the curvature between them.
+    float filterExcess(size_t b) const
+    {
+        auto db = [this](size_t i) { return 10.0f * std::log10(juce::jmax(1.0e-16f, powers[i])); };
+        // Log-frequency curvature: a broad spectral tilt is not a fault.
+        return db(b + 1) - 0.5f * (db(b) + db(b + 2));
+    }
+
+    /*  How far the region around a band rises above the smooth trend through it.
+
+        Both figures are averaged in the log-frequency domain, because that is
+        how the spectrum of a voice is shaped and how it is heard: a linear
+        average over a wide span would be dominated by the top octave, which
+        holds most of the bins and almost none of the energy.
+
+        The band itself is measured across a third of an octave — the width of
+        a resonance that a listener perceives as one — and the trend across two
+        octaves centred on the same place. Subtracting one from the other leaves
+        exactly what a tilt does not explain, which is the definition of a
+        prominence and the thing this stage is meant to remove.
+    */
+    float spectralExcess(size_t b) const
+    {
+        const auto centre = static_cast<double>(frequencies[b]);
+        const auto meanDb = [this](double lowHz, double highHz) {
+            const int first = juce::jmax(1, static_cast<int>(lowHz / spectrumBinHz));
+            const int last = juce::jmin(spectrumBinCount - 1, static_cast<int>(highHz / spectrumBinHz));
+            if (last <= first) return -160.0f;
+
+            double sum = 0.0;
+            int counted = 0;
+            for (int bin = first; bin <= last; ++bin) {
+                const float magnitude = spectrum[bin] * spectrumScale;
+                sum += 20.0 * std::log10(juce::jmax(1.0e-9f, magnitude));
+                ++counted;
+            }
+            return static_cast<float>(sum / juce::jmax(1, counted));
+        };
+
+        const float band = meanDb(centre * 0.891, centre * 1.122);   // a third of an octave
+        const float trend = meanDb(centre * 0.5, centre * 2.0);      // two octaves around it
+        return band - trend;
+    }
+
     void update()
     {
         std::array<float, 5> targets {};
@@ -73,9 +152,7 @@ private:
         if (totalPower > 3.162278e-6f && amount > 0) {
             for (size_t b = 0; b < targets.size(); ++b) {
                 if (frequencies[b] > sr * 0.3) continue;
-                auto db = [this](size_t i) { return 10.0f * std::log10(juce::jmax(1.0e-16f, powers[i])); };
-                // Log-frequency curvature: a broad spectral tilt is not a fault.
-                const float excess = db(b + 1) - 0.5f * (db(b) + db(b + 2));
+                const float excess = usingSpectrum() ? spectralExcess(b) : filterExcess(b);
                 targets[b] = amount * juce::jlimit(0.0f, budget, (excess - deadbandDb) * slope);
                 sum += targets[b];
             }
@@ -115,6 +192,12 @@ private:
     static constexpr double detectorQ = 2.5;
     static constexpr float deadbandDb = 2.5f;   // below this it is tilt, not a fault
     static constexpr float slope = 1.0f;
+
+    const float* spectrum = nullptr;
+    int spectrumBinCount = 0;
+    double spectrumBinHz = 0.0;
+    float spectrumScale = 1.0f;
+    uint32_t spectrumFrame = 0;
 
     double sr = 48000;
     int channelCount = 2, interval = 240, countdown = 0;
