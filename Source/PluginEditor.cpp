@@ -279,6 +279,24 @@ void VoxeraAudioProcessorEditor::drawMeter(juce::Graphics& g, juce::Rectangle<fl
     }
     g.setColour(pink); g.drawText(juce::String(db, 1) + " dBFS", r.withTrimmedTop(18).toNearestInt(), juce::Justification::left);
 }
+void VoxeraAudioProcessorEditor::drawWorking(juce::Graphics& g, juce::Rectangle<float> r,
+                                             const juce::String& label, float db, float fullScaleDb)
+{
+    g.setFont(font(9.0f, true));
+    g.setColour(pink.withAlpha(0.75f));
+    g.drawText(label, r.removeFromTop(12).toNearestInt(), juce::Justification::centred);
+
+    const float filled = juce::jlimit(0.0f, 1.0f, std::abs(db) / fullScaleDb);
+    g.setColour(pink.withAlpha(0.13f));
+    g.fillRoundedRectangle(r.getX(), r.getY(), r.getWidth(), 7.0f, 3.0f);
+    if (filled > 0.005f) {
+        g.setColour(pink.withAlpha(0.85f));
+        g.fillRoundedRectangle(r.getX(), r.getY(), r.getWidth() * filled, 7.0f, 3.0f);
+    }
+    g.setFont(font(9.0f));
+    g.setColour(juce::Colour(0xfff6c0e4));
+    g.drawText(juce::String(db, 1), r.withTrimmedTop(9).toNearestInt(), juce::Justification::centred);
+}
 void VoxeraAudioProcessorEditor::drawMascot(juce::Graphics& g, juce::Rectangle<float> r)
 {
     juce::Graphics::ScopedSaveState state(g);
@@ -314,6 +332,19 @@ void VoxeraAudioProcessorEditor::paint(juce::Graphics& g)
     g.fillRoundedRectangle(63, 79, 1074, 438, 18);
     drawMeter(g, {95, 103, 130, 62}, inPeak, "IN");
     drawMeter(g, {1000, 103, 130, 62}, outPeak, "OUT");
+
+    /*  Ten stages now act on the signal, most of them deciding for themselves
+        how hard to work. Without this row the only way to tell which one is
+        responsible for a sound is to bypass them one at a time.
+    */
+    {
+        const float x0 = 268.0f, w = 108.0f, gap = 18.0f;
+        drawWorking(g, {x0,                     108, w, 34}, "GATE",    processor.gateReductionDb(), 40.0f);
+        drawWorking(g, {x0 + (w + gap),         108, w, 34}, "OPTICAL", -processor.opticalReductionDb(), 12.0f);
+        drawWorking(g, {x0 + 2 * (w + gap),     108, w, 34}, "DENSITY", processor.densityLiftDb(), 12.0f);
+        drawWorking(g, {x0 + 3 * (w + gap),     108, w, 34}, "LIMIT",   processor.limiterReductionDb(), 6.0f);
+        drawWorking(g, {x0 + 4 * (w + gap),     108, w, 34}, "LOCK Hz", processor.lockMudHz(), 700.0f);
+    }
     if (activePage != 4) {
     const juce::String logo("VOXERA");
     g.setFont(juce::Font(juce::FontOptions(110.0f, juce::Font::bold | juce::Font::italic)).withHorizontalScale(1.45f));
@@ -364,6 +395,22 @@ void VoxeraAudioProcessorEditor::paint(juce::Graphics& g)
     if (activePage == 0) {
         g.setColour(pink.withAlpha(0.8f)); g.setFont(font(11));
         g.drawText(processor.profileReady.load() ? "PROFILE READY" : "Sing for 8s, then raise Auto Voice", 308, 445, 290, 28, juce::Justification::left);
+
+        /*  Auto Mix moves twenty controls at once. Printing what it concluded,
+            in the same words a mixer would use, is what lets the singer
+            disagree with it rather than guess which knob to undo.
+        */
+        const auto& report = processor.autoMixReport();
+        if (report.isNotEmpty()) {
+            g.setColour(pink.withAlpha(0.10f));
+            g.fillRoundedRectangle(612, 436, 496, 104, 6);
+            g.setFont(font(9.0f));
+            g.setColour(juce::Colour(0xfff6c0e4));
+            juce::StringArray lines;
+            lines.addLines(report);
+            for (int i = 0; i < juce::jmin(9, lines.size()); ++i)
+                g.drawText(lines[i], 622, 440 + i * 11, 480, 11, juce::Justification::left);
+        }
     }
     g.setColour(ink.withAlpha(0.45f)); g.drawHorizontalLine(548, 24, 1176);
     g.setFont(font(10)); g.setColour(ink);

@@ -21,6 +21,19 @@ Tono senoidal de 1 kHz, dos segundos; Amount 100%, Budget 3 dB, Response 100 ms.
 
 Estas mediciones verifican funcionamiento y límites, no calidad vocal perceptual. La curva de detección puede pedir menos corrección que el margen máximo permitido.
 
+## Coste de CPU
+
+Medido en `integration_tests` con la cadena entera activa y ninguna etapa en reposo, sobre diez segundos de tono sostenido. El factor indica cuántos segundos de audio procesa un segundo de CPU.
+
+| Frecuencia | Cadena completa | Sin el shifter |
+|---|---:|---:|
+| 48 kHz | 9,4× — 10,6 % de un núcleo (~9 instancias) | 26,3× — 3,8 % (~26 instancias) |
+| 96 kHz | 3,0× — 33,5 % de un núcleo (~2 instancias) | 8,2× — 12,2 % (~8 instancias) |
+
+**Rubber Band LiveShifter es el 64 % del coste** a ambas frecuencias. Las demás etapas juntas —gate, óptico, upward, punch, exciter, character, soft clip, limitador, vocal lock, Smart EQ y motor espectral— suman el 3,8 % de un núcleo a 48 kHz.
+
+Esto coincide con la medición de latencia: el mismo módulo es el 92 % del retardo y el 64 % de la CPU. La cifra es de esta máquina concreta; la aserción del test es deliberadamente laxa (>1,5×) porque un runner de CI no es una máquina de mezcla, y solo pretende detectar regresiones de un orden de magnitud.
+
 ## Modo Low Latency (tracking)
 
 Medido, no estimado: la cadena completa reporta 2827 muestras a 44,1 kHz, 2845 a 48 kHz y 5109 a 96 kHz. De esas, **2623 son de Rubber Band LiveShifter** — el 92 %. Con `lowLatency` activo el shifter sale de la ruta de señal y la latencia cae a 204 / 222 / 438 muestras, es decir **4,6 ms en las tres frecuencias**, verificado en `integration_tests`.
@@ -51,6 +64,9 @@ Compilado con MSVC 19.44 (VS Build Tools 2022) y CMake 3.31.7 sobre Windows 11:
 - **Gate**: con una nota seguida de una consonante final a -44 dBFS y después silencio, la consonante se conserva (pico 0,006) y el silencio queda exactamente en 0, a 44,1/48/96 kHz. Retardo puro exacto con la etapa desactivada.
 - **Soft clip**: identidad exacta con cantidad 0. A tope reduce el factor de cresta de 1,414 a 1,071 sin superar fondo de escala. El 2º armónico mide 8,2e-06 frente a 0,401 del 3º — **el 0,002 %** — lo que confirma que la curva es impar como se afirma. No se ha medido la reducción de aliasing por ADAA frente a una evaluación puntual; la afirmación se apoya en el método, no en una medida.
 - **Optical**: 1,0 dB de reducción con el control a 0 y 16,4 dB a tope, salidas finitas.
+- **Upward (Density)**: con el control a tope, una señal a −64 dBFS recibe 0 dB, una a −34 dBFS recibe +5,4 dB y una a −6 dBFS recibe 0,00008 dB. Sube el detalle flojo sin tocar lo fuerte ni levantar el ruido de fondo. Identidad exacta con el control a 0.
+- **Vocal Lock**: tras asentarse sobre un bajo (100 Hz) coloca el paso-alto en 60 Hz y el corte de turbidez en 217 Hz; sobre una soprano (400 Hz), en 220 Hz y 700 Hz. **Más de 3× de diferencia** entre ambas voces, que es justo lo que un EQ de frecuencia fija no puede hacer. Ignora el material sin tono: 4000 lecturas no sonoras no mueven el corte ni 1 Hz. Identidad exacta a 0.
+- **Saturación asimétrica (Warmth)**: con `tanh` simétrico el 2º armónico mide 5,0e-08 frente a 0,336 del 3º — es decir, ausente, porque una función impar no puede producirlo. Con Warmth a tope el 2º sube a 0,436 frente a 0,684 del 3º. El sesgo introduce un componente de continua dependiente de la señal, que un bloqueador a 12 Hz retira.
 - **Character**: Neutral es idéntico muestra a muestra. Bright sube 6 kHz y baja 150 Hz, Dark hace lo contrario, Demon pesa más que Neutral y Robot queda por debajo de Dark en graves y de Neutral en agudos. Todos los desplazamientos de formante quedan dentro de ±12 semitonos.
 
 ## Auto Mix

@@ -5,6 +5,9 @@
 #include "../Source/DSP/Exciter.h"
 #include "../Source/DSP/Gate.h"
 #include "../Source/DSP/Optical.h"
+#include "../Source/DSP/Upward.h"
+#include "../Source/DSP/VocalLock.h"
+#include <memory>
 #include "../Source/DSP/SoftClip.h"
 #include "../Source/DSP/Character.h"
 #include "../Source/DSP/AutoMix.h"
@@ -443,6 +446,145 @@ void checkCharacter()
     std::cout << "PASS: voice characters tilt as named, neutral is exact, formants in range\n";
 }
 
+void checkUpward()
+{
+    constexpr double sr = 48000.0;
+    const int length = static_cast<int>(sr);   // one second, well past the release
+
+    // Level is what this stage keys on, so each case is one steady amplitude.
+    const auto gainAt = [&](float amplitude, float amount) {
+        voxera::Upward up; up.prepare(sr, 2); up.setAmount(amount);
+        juce::AudioBuffer<float> b(2, length);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < length; ++i) b.setSample(ch, i, sine(300.0, i, sr, amplitude));
+        up.process(b);
+        // Measure at the end, once the slow envelope has settled.
+        float peak = 0.0f;
+        for (int i = length - 4096; i < length; ++i) peak = juce::jmax(peak, std::abs(b.getSample(0, i)));
+        return juce::Decibels::gainToDecibels(peak / amplitude);
+    };
+
+    // 0.0006 is about -64 dBFS: below the floor, so it is noise as far as this
+    // stage is concerned. 0.02 is -34 dBFS, quiet detail worth raising. 0.5 is
+    // -6 dBFS, already loud and none of its business.
+    const float noise = gainAt(0.0006f, 1.0f);
+    const float quiet = gainAt(0.02f, 1.0f);
+    const float loud  = gainAt(0.5f, 1.0f);
+    const float off   = gainAt(0.02f, 0.0f);
+
+    CHECK(std::abs(off) < 0.01f);        // identity at zero
+    CHECK(quiet > 3.0f);                 // quiet detail is genuinely raised
+    CHECK(std::abs(loud) < 0.5f);        // loud material is left alone
+    CHECK(noise < quiet * 0.5f);         // and the floor is not lifted with it
+    CHECK(quiet <= 12.5f);               // never beyond the declared cap
+
+    std::cout << "Upward: noise " << noise << " dB, quiet +" << quiet
+              << " dB, loud " << loud << " dB\n";
+    std::cout << "PASS: upward compression raises quiet detail, spares loud and noise\n";
+}
+
+void checkWarmth()
+{
+    constexpr double sr = 48000.0;
+    constexpr int length = 16384;
+    constexpr double f0 = 500.0;
+
+    const auto harmonics = [&](float warmth) {
+        juce::dsp::ProcessSpec spec { sr, 512, 2 };
+        Saturator sat; sat.prepare(spec);
+        sat.setDriveDb(18.0f); sat.setMix(1.0f); sat.setWarmth(warmth);
+        juce::AudioBuffer<float> b(2, length);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < length; ++i) b.setSample(ch, i, sine(f0, i, sr, 0.5f));
+        // Two passes so the smoothed drive and warmth have reached target.
+        sat.process(b);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < length; ++i) b.setSample(ch, i, sine(f0, i, sr, 0.5f));
+        sat.process(b);
+        return std::make_pair(toneMagnitude(b, sr, 2.0 * f0),   // even
+                              toneMagnitude(b, sr, 3.0 * f0));  // odd
+    };
+
+    const auto plain = harmonics(0.0f);
+    const auto warm = harmonics(1.0f);
+
+    std::cout << "Saturator symmetric: 2nd " << plain.first << ", 3rd " << plain.second << '\n';
+    std::cout << "Saturator warm:      2nd " << warm.first << ", 3rd " << warm.second << '\n';
+
+    /*  tanh is odd, so with no bias the second harmonic must be absent — that
+        is the limitation the warmth control exists to lift. With bias it has to
+        appear, and substantially, while the odd harmonics carry on as before.
+    */
+    CHECK(plain.second > 1.0e-3f);              // the stage is distorting at all
+    CHECK(plain.first < plain.second * 0.01f);  // and symmetrically
+    CHECK(warm.first > plain.first * 20.0f);    // bias produced even harmonics
+    CHECK(warm.first > warm.second * 0.1f);     // at a level that matters
+    std::cout << "PASS: warmth turns a symmetric shaper into one with even harmonics\n";
+}
+
+void checkVocalLock()
+{
+    constexpr double sr = 48000.0;
+
+    // Settle the tracker on a singer whose voice sits around `hz`, singing a
+    // melody of +/- 5 semitones around it.
+    const auto settleOn = [&](float hz) {
+        auto lock = std::make_unique<voxera::VocalLock>();
+        lock->prepare(sr, 2);
+        lock->setAmount(1.0f);
+        for (int block = 0; block < 4000; ++block) {
+            const float semitone = 5.0f * std::sin(block * 0.03f);
+            lock->observePitch(hz * std::pow(2.0f, semitone / 12.0f), 0.9f);
+        }
+        return lock;
+    };
+
+    // A bass around 100 Hz and a soprano around 400 Hz.
+    const auto bass = settleOn(100.0f);
+    const auto soprano = settleOn(400.0f);
+
+    std::cout << "VocalLock bass    (100 Hz): HPF " << bass->highPassHz()
+              << " Hz, mud cut " << bass->mudHz() << " Hz\n";
+    std::cout << "VocalLock soprano (400 Hz): HPF " << soprano->highPassHz()
+              << " Hz, mud cut " << soprano->mudHz() << " Hz\n";
+
+    // The whole point: both filters must land somewhere different for the two
+    // voices. A fixed 250 Hz mud cut would be sitting on the soprano's
+    // fundamental, and a fixed 80 Hz high-pass leaves her rumble untouched.
+    CHECK(soprano->highPassHz() > bass->highPassHz() * 1.5f);
+    CHECK(soprano->mudHz() > bass->mudHz() * 1.5f);
+    // The mud cut has to stay above the fundamental it is protecting.
+    CHECK(bass->mudHz() > 100.0f);
+    CHECK(soprano->mudHz() > 400.0f);
+    // And both stay inside the declared bounds.
+    for (const auto* l : { bass.get(), soprano.get() }) {
+        CHECK(l->highPassHz() >= 45.0f && l->highPassHz() <= 220.0f);
+        CHECK(l->mudHz() >= 140.0f && l->mudHz() <= 700.0f);
+    }
+
+    // Unvoiced material must not drag the estimate down: consonants and breaths
+    // report no fundamental, and averaging those in would sink both filters.
+    const auto before = soprano->mudHz();
+    for (int i = 0; i < 4000; ++i) soprano->observePitch(0.0f, 0.0f);
+    for (int i = 0; i < 400; ++i) soprano->observePitch(30.0f, 0.95f);   // below range
+    CHECK(std::abs(soprano->mudHz() - before) < 1.0f);
+
+    // Identity at zero, whatever the tracker has decided.
+    constexpr int length = 4096;
+    juce::AudioBuffer<float> dry(2, length), through(2, length);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < length; ++i) dry.setSample(ch, i, sine(220.0, i, sr, 0.3f));
+    auto quiet = settleOn(220.0f);
+    quiet->setAmount(0.0f);
+    through.makeCopyOf(dry);
+    quiet->process(through); through.makeCopyOf(dry); quiet->process(through);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < length; ++i)
+            CHECK(through.getSample(ch, i) == dry.getSample(ch, i));
+
+    std::cout << "PASS: vocal lock follows the singer's register, ignores unvoiced, exact at zero\n";
+}
+
 void checkAutoMix()
 {
     using Profile = VoiceProfileEngine::Profile;
@@ -499,7 +641,11 @@ void checkAutoMix()
         CHECK(s.optical >= 0.0f && s.optical <= 100.0f);
         CHECK(s.clipAmount >= 0.0f && s.clipAmount <= 100.0f);
         CHECK(s.gateThresholdDb >= -80.0f && s.gateThresholdDb <= -20.0f);
+        CHECK(s.density >= 0.0f && s.density <= 100.0f);
+        CHECK(s.vocalLock >= 0.0f && s.vocalLock <= 100.0f);
     }
+    CHECK(loose.density > neutral.density);
+    CHECK(muddy.vocalLock > neutral.vocalLock);
     CHECK(loose.optical > neutral.optical);
     std::cout << "PASS: auto-mix reacts to mud, dullness, sibilance and dynamics, stays in range\n";
 }
@@ -510,7 +656,8 @@ int main() {
     checkSpectralPartitioning(); checkSlowDelay();
     std::cout << "PASS: module bypass fades, spectral partitioning, tempo delay\n";
     checkLimiter(); checkExciter(); checkPunch();
-    checkGate(); checkSoftClip(); checkOptical(); checkCharacter(); checkAutoMix();
+    checkGate(); checkSoftClip(); checkOptical(); checkCharacter();
+    checkUpward(); checkWarmth(); checkVocalLock(); checkAutoMix();
     for (double sr : {44100.0, 48000.0, 96000.0}) {
         for (float hz : {80.0f, 110.0f, 220.0f, 440.0f, 880.0f}) {
             YinPitchDetector yin; yin.prepare(sr);

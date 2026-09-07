@@ -15,6 +15,8 @@
 #include "DSP/Exciter.h"
 #include "DSP/Gate.h"
 #include "DSP/Optical.h"
+#include "DSP/Upward.h"
+#include "DSP/VocalLock.h"
 #include "DSP/SoftClip.h"
 #include "DSP/Character.h"
 #include "DSP/AutoMix.h"
@@ -64,6 +66,16 @@ public:
     float gateReductionDb() const noexcept { return gate.getReductionDb(); }
     int reportedLatencySamples() const noexcept { return activeLatencySamples.load(); }
     float opticalReductionDb() const noexcept { return optical.getReductionDb(); }
+    float densityLiftDb() const noexcept { return upward.getLiftDb(); }
+    // Shown in the editor so the singer can see the chain following their range.
+    float lockHighPassHz() const noexcept { return vocalLock.highPassHz(); }
+    float lockMudHz() const noexcept { return vocalLock.mudHz(); }
+
+    /*  What the last auto-mix concluded, in words. Written in handleAsyncUpdate
+        and read by the editor's timer, both of which are the message thread, so
+        no synchronisation is needed here.
+    */
+    const juce::String& autoMixReport() const noexcept { return lastReport; }
     std::atomic<float> captureProgress { 0.0f };
     std::atomic<bool> capturing { false }, profileReady { false };
     std::array<std::atomic<float>, 256> scope {};
@@ -154,6 +166,11 @@ private:
         std::atomic<float>* clipAmount {};
         std::atomic<float>* character {};
         std::atomic<float>* lowLatency {};
+        std::atomic<float>* density {};
+        std::atomic<float>* vocalLock {};
+        std::atomic<float>* satWarmth {};
+        std::atomic<float>* reverbBody {};
+        std::atomic<float>* reverbAir {};
     } prm;
 
     // The chain can report two different latencies. Both are worked out once in
@@ -189,12 +206,15 @@ private:
     VoiceProfileEngine voiceProfile;
     voxera::Gate gate;
     voxera::Optical optical;
+    voxera::Upward upward;
+    voxera::VocalLock vocalLock;
     voxera::Punch punch;
     voxera::Exciter exciter;
     voxera::Character character;
     voxera::SoftClip softClip;
     voxera::Limiter limiter;
 
+    juce::String lastReport;
     bool previousAnalyzeState = false;
     bool profileNeedsPublish = false;
 

@@ -33,6 +33,9 @@ private:
     void timerCallback() override;
     void filePreset(bool save);
     void drawMeter(juce::Graphics&, juce::Rectangle<float>, float, const juce::String&);
+    // Compact horizontal bar for one stage's gain change, so it is visible at a
+    // glance which of the ten stages is actually doing something.
+    void drawWorking(juce::Graphics&, juce::Rectangle<float>, const juce::String&, float, float);
     void drawMascot(juce::Graphics&, juce::Rectangle<float>);
     VoxeraAudioProcessor& processor;
     VoxeraLookAndFeel theme;

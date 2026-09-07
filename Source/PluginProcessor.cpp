@@ -64,6 +64,11 @@ namespace ParamIDs
     static constexpr auto clipAmount = "clipAmount";
     static constexpr auto character = "character";
     static constexpr auto lowLatency = "lowLatency";
+    static constexpr auto density = "density";
+    static constexpr auto vocalLock = "vocalLock";
+    static constexpr auto satWarmth = "satWarmth";
+    static constexpr auto reverbBody = "reverbBody";
+    static constexpr auto reverbAir = "reverbAir";
 }
 
 VoxeraAudioProcessor::VoxeraAudioProcessor()
@@ -134,6 +139,11 @@ void VoxeraAudioProcessor::bindParameters()
     prm.clipAmount = bind(ParamIDs::clipAmount);
     prm.character = bind(ParamIDs::character);
     prm.lowLatency = bind(ParamIDs::lowLatency);
+    prm.density = bind(ParamIDs::density);
+    prm.vocalLock = bind(ParamIDs::vocalLock);
+    prm.satWarmth = bind(ParamIDs::satWarmth);
+    prm.reverbBody = bind(ParamIDs::reverbBody);
+    prm.reverbAir = bind(ParamIDs::reverbAir);
 }
 
 /*  Parameters are grouped so hosts and the advanced page show a structured tree
@@ -245,7 +255,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxeraAudioProcessor::create
                 { "Neutral", "Bright", "Dark", "Ghost", "Robot", "Demon" }, 0)),
 
         group("tracking", "Tracking",
-            toggle(ParamIDs::lowLatency, "Low Latency", false)));
+            toggle(ParamIDs::lowLatency, "Low Latency", false)),
+
+        group("density", "Density",
+            number(ParamIDs::density, "Density", { 0.0f, 100.0f, 0.1f }, 0.0f)),
+
+        group("lock", "Vocal Lock",
+            number(ParamIDs::vocalLock, "Vocal Lock", { 0.0f, 100.0f, 0.1f }, 0.0f)),
+
+        group("tone", "Tone",
+            number(ParamIDs::satWarmth, "Warmth", { 0.0f, 100.0f, 0.1f }, 0.0f),
+            number(ParamIDs::reverbBody, "Reverb Body", { 0.0f, 100.0f, 0.1f }, 50.0f),
+            number(ParamIDs::reverbAir, "Reverb Air", { -8.0f, 8.0f, 0.1f }, 0.0f)));
 
     return layout;
 }
@@ -275,6 +296,8 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     gate.prepare(sampleRate, getTotalNumOutputChannels());
     optical.prepare(sampleRate, getTotalNumOutputChannels());
+    upward.prepare(sampleRate, getTotalNumOutputChannels());
+    vocalLock.prepare(sampleRate, getTotalNumOutputChannels());
     punch.prepare(spec);
     exciter.prepare(sampleRate, getTotalNumOutputChannels());
     character.prepare(sampleRate, getTotalNumOutputChannels());
@@ -332,6 +355,8 @@ void VoxeraAudioProcessor::releaseResources()
     spatialEngine.reset();
     gate.reset();
     optical.reset();
+    upward.reset();
+    vocalLock.reset();
     punch.reset();
     exciter.reset();
     character.reset();
@@ -497,6 +522,15 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
             pitchEngine.getDetectedHz(),
             pitchEngine.getConfidence());
 
+    /*  First corrective step, before anything else shapes the spectrum: it
+        removes rumble and boxiness relative to this singer's own register
+        rather than to a frequency picked in advance. The detector runs in
+        tracking mode too, so this keeps working with the shifter bypassed.
+    */
+    vocalLock.observePitch(pitchEngine.getDetectedHz(), pitchEngine.getConfidence());
+    vocalLock.setAmount(prm.vocalLock->load() * 0.01f);
+    vocalLock.process(buffer);
+
     const auto profile = voiceProfile.getProfile();
     const float autoVoice = prm.autoVoice->load() * 0.01f;
 
@@ -574,12 +608,20 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     optical.setAmount(prm.optical->load() * 0.01f);
     optical.process(buffer);
 
+    // After both downward stages, working from the opposite direction: they have
+    // already decided where the ceiling is, so what is left to do is raise the
+    // floor towards it. Doing this earlier would only give those stages more to
+    // push back down.
+    upward.setAmount(prm.density->load() * 0.01f);
+    upward.process(buffer);
+
     // Parallel, and last of the three, so it fills the gaps the serial stages
     // just opened rather than fighting an already-dense signal.
     punch.setAmount(prm.punch->load() * 0.01f);
     punch.process(buffer);
 
     saturator.setDriveDb(prm.satDrive->load());
+    saturator.setWarmth(prm.satWarmth->load() * 0.01f);
     saturator.setMix(prm.satMix->load() * 0.01f);
     saturator.process(buffer);
 
@@ -607,6 +649,8 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     spatialEngine.setDelay(prm.delayMix->load() * 0.01f);
     spatialEngine.setDelayFeedback(prm.delayFeedback->load() * 0.01f);
     spatialEngine.setSpace(prm.space->load() * 0.01f);
+    spatialEngine.setReverbBody(prm.reverbBody->load() * 0.01f);
+    spatialEngine.setReverbAirDb(prm.reverbAir->load());
     spatialEngine.setDuck(prm.duck->load() * 0.01f);
     spatialEngine.process(buffer);
 
@@ -756,10 +800,13 @@ void VoxeraAudioProcessor::handleAsyncUpdate()
 void VoxeraAudioProcessor::applyAutoMix()
 {
     const auto profile = publishedProfile.read();
+    const auto diagnosis = voxera::diagnose(profile);
+    lastReport = voxera::describe(diagnosis, voxera::decide(diagnosis));
+
     // A capture that never heard a usable signal must not rewrite the chain.
     if (!profile.ready) return;
 
-    const auto settings = voxera::decide(profile);
+    const auto settings = voxera::decide(diagnosis);
     const auto set = [this](const char* id, float value) { setParameterNotifying(id, value); };
 
     set(ParamIDs::clean, settings.clean);
@@ -768,9 +815,11 @@ void VoxeraAudioProcessor::applyAutoMix()
     set(ParamIDs::airDb, settings.airDb);
     set(ParamIDs::deEss, settings.deEss);
     set(ParamIDs::smartEQAmount, settings.smartEQAmount);
+    set(ParamIDs::vocalLock, settings.vocalLock);
     set(ParamIDs::compThreshold, settings.compThreshold);
     set(ParamIDs::compRatio, settings.compRatio);
     set(ParamIDs::optical, settings.optical);
+    set(ParamIDs::density, settings.density);
     set(ParamIDs::punch, settings.punch);
     set(ParamIDs::clipAmount, settings.clipAmount);
     set(ParamIDs::gateThreshold, settings.gateThresholdDb);
@@ -796,22 +845,31 @@ void VoxeraAudioProcessor::applyFactoryPreset(int index)
 {
     // Deliberately preserve key, scale, input/output gain and learned voice profile.
     const auto set = [this](const char* id, float value) { setParameterNotifying(id, value); };
-    // Declaring both with the same extent makes a mismatched row a compile error.
-    static constexpr int numPresetValues = 10;
+    /*  Declaring both with the same extent makes a mismatched row a compile
+        error. Every preset drives the whole chain rather than a corner of it:
+        a preset that leaves the density, optical and clip stages at zero is
+        heard as the plugin sounding thin, whatever the rest is doing.
+    */
+    static constexpr int numPresetValues = 15;
     static constexpr const char* ids[numPresetValues] = {
         "tuneAmount", "retune", "humanize", "toneMacro", "airDb",
-        "space", "satDrive", "satMix", "punch", "exciter"
+        "space", "satDrive", "satMix", "punch", "exciter",
+        "optical", "density", "clipAmount", "smartEQAmount", "vocalLock"
     };
     static constexpr float values[numFactoryPresets][numPresetValues] = {
-        //  tune  retune  human   tone   air  space  drive   mix  punch  excite
-        {     35,     30,    70,     0,    0,     5,     0,    0,     0,     10 }, // Clean
-        {     55,     40,    60,   -30,   -1,    12,     6,   25,    20,      8 }, // Warm
-        {    100,     75,    25,    10,    2,    18,     4,   15,    55,     45 }, // Modern
-        {     70,     45,    65,    20,    4,    65,     3,   12,    25,     35 }, // Dream
-        {     90,     85,    10,   -65,   -5,     8,    14,   65,    70,     30 }  // Radio
+        // tune retune human  tone  air space drive  mix punch excite optic dens clip smrtEQ lock
+        {   35,    30,   70,    0,   1,    8,    2,   8,   20,    15,   25,  35,   5,    20,   55 }, // Clean
+        {   55,    40,   60,  -30,  -1,   14,    7,  30,   35,    10,   45,  45,  12,    30,   60 }, // Warm
+        {  100,    75,   25,   10,   3,   18,    5,  20,   60,    50,   55,  65,  25,    40,   70 }, // Modern
+        {   70,    45,   65,   20,   4,   65,    3,  15,   30,    40,   40,  50,  10,    25,   50 }, // Dream
+        {   90,    85,   10,  -55,  -3,   10,   14,  60,   75,    35,   70,  80,  45,    35,   75 }  // Radio
     };
     index = juce::jlimit(0, numFactoryPresets - 1, index);
     for (int i = 0; i < numPresetValues; ++i) set(ids[i], values[index][i]);
+    // The gate belongs on for all of them: everything above works by raising
+    // quiet material, and room tone is quiet material.
+    set(ParamIDs::gateOn, 1.0f);
+    set(ParamIDs::limiterOn, 1.0f);
     set("pitchOn", 1); set("spectralOn", 1); set("spatialOn", 1);
     set("globalMix", 100); set("pitchMode", index == 0 ? 0.0f : index == 4 ? 2.0f : 1.0f);
     currentProgram = index;

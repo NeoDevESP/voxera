@@ -1,10 +1,76 @@
 #include "../Source/PluginProcessor.h"
 #include "Checks.h"
+#include <chrono>
 #include <iostream>
 
 void set(VoxeraAudioProcessor& p, const char* id, float value) {
     auto* parameter = p.apvts.getParameter(id); CHECK(parameter);
     parameter->setValueNotifyingHost(parameter->convertTo0to1(value));
+}
+
+/*  Cost of the whole chain with every stage doing real work.
+
+    The figure that matters to someone loading this on eight vocal tracks is not
+    milliseconds but the realtime factor: how many seconds of audio one second of
+    CPU can process. The assertion is deliberately loose, because a CI runner is
+    not the machine anyone mixes on and a tight bound would fail for reasons that
+    have nothing to do with this code. What it does catch is an order-of-magnitude
+    regression, which is the kind that matters.
+*/
+double measureCost(double sr, int blockSize, bool tracking)
+{
+    juce::MidiBuffer midi;
+    VoxeraAudioProcessor p;
+
+    // Everything on, and nothing left at rest.
+    for (const auto* id : { "pitchOn", "spectralOn", "spatialOn", "gateOn", "limiterOn" })
+        set(p, id, 1.0f);
+    for (const auto* id : { "punch", "exciter", "optical", "density", "clipAmount",
+                            "vocalLock", "smartEQAmount", "satWarmth", "autoVoice" })
+        set(p, id, 80.0f);
+    set(p, "satMix", 60.0f);
+    set(p, "space", 50.0f);
+    set(p, "character", 1.0f);
+    set(p, "lowLatency", tracking ? 1.0f : 0.0f);
+
+    p.prepareToPlay(sr, blockSize);
+
+    const int blocks = static_cast<int>(sr * 10.0 / blockSize);   // ten seconds
+    juce::AudioBuffer<float> b(2, blockSize);
+
+    // A sung note rather than silence: gates, detectors and compressors all cost
+    // differently depending on whether they think anything is happening.
+    int phase = 0;
+    const auto fill = [&] {
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < blockSize; ++i)
+                b.setSample(ch, i, 0.25f * std::sin(juce::MathConstants<float>::twoPi
+                                                    * 220.0f * static_cast<float>(phase + i) / static_cast<float>(sr)));
+        phase += blockSize;
+    };
+
+    fill(); p.processBlock(b, midi);   // one block outside the timing, to settle
+
+    const auto start = std::chrono::steady_clock::now();
+    for (int n = 0; n < blocks; ++n) { fill(); p.processBlock(b, midi); }
+    const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    const double audioSeconds = static_cast<double>(blocks * blockSize) / sr;
+    const double realtimeFactor = audioSeconds / elapsed;
+
+    std::cout << "COST " << sr << " Hz, block " << blockSize
+              << (tracking ? ", shifter bypassed: " : ", full chain:      ")
+              << realtimeFactor << "x realtime ("
+              << (100.0 / realtimeFactor) << "% of one core, about "
+              << static_cast<int>(realtimeFactor) << " instances)\n";
+
+    // Loose on purpose: a CI runner is not a mixing machine, and a tight bound
+    // would fail for reasons unrelated to this code. What it catches is an
+    // order-of-magnitude regression.
+    CHECK(realtimeFactor > 1.5);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < blockSize; ++i) CHECK(std::isfinite(b.getSample(ch, i)));
+    return realtimeFactor;
 }
 int main(int argc, char** argv)
 {
@@ -70,6 +136,16 @@ int main(int argc, char** argv)
                   << mixLatency << ", tracking " << trackingLatency << " ("
                   << (1000.0 * trackingLatency / sr) << " ms)\n";
     }
+    // Measured both ways at each rate, because the difference between them is
+    // the pitch shifter's share of the bill and nothing else changes.
+    for (const auto rate : { 48000.0, 96000.0 }) {
+        const double full = measureCost(rate, 128, false);
+        const double bypassed = measureCost(rate, 128, true);
+        std::cout << "     shifter accounts for "
+                  << static_cast<int>(100.0 * (1.0 / full - 1.0 / bypassed) / (1.0 / full))
+                  << "% of the chain's cost at " << rate << " Hz\n";
+    }
+
     VoxeraAudioProcessor p;
     set(p, "delayFeedback", 100); CHECK(p.getTailLengthSeconds() > 85.0);
     set(p, "delayFeedback", 0); CHECK(p.getTailLengthSeconds() >= 7.8);

@@ -27,6 +27,10 @@ public:
         doubleHP.setHighPass(170.0, 0.707);
         doubleLP.setLowPass(12000.0, 0.707);
 
+        reverbHP.prepare(sr, 2);
+        reverbAir.prepare(sr, 2);
+        applyReverbTone();
+
         width.reset(sr, 0.050);
         doubleAmount.reset(sr, 0.050);
         delayAmount.reset(sr, 0.050);
@@ -93,6 +97,31 @@ public:
         reverb.setSpace(s);
     }
 
+    /*  Tone controls for the reverb tail alone, not for the dry voice.
+
+        A full-range reverb under a vocal is what makes a mix sound smeared: the
+        tail's low end sits exactly where the singer's fundamental and the bass
+        already are, and none of it is doing anything a listener can locate. Low
+        Body cuts further into it, so the space is audible without the mix
+        thickening. Air lifts the top of the tail instead, which reads as size
+        rather than as mud.
+    */
+    void setReverbBody(float v01) noexcept
+    {
+        const float clamped = juce::jlimit(0.0f, 1.0f, v01);
+        if (std::abs(clamped - body) < 1.0e-4f) return;
+        body = clamped;
+        applyReverbTone();
+    }
+
+    void setReverbAirDb(float db) noexcept
+    {
+        const float clamped = juce::jlimit(-8.0f, 8.0f, db);
+        if (std::abs(clamped - airDb) < 1.0e-3f) return;
+        airDb = clamped;
+        applyReverbTone();
+    }
+
     void setDuck(float v01) noexcept
     {
         duckAmount.setTargetValue(juce::jlimit(0.0f, 1.0f, v01));
@@ -157,6 +186,11 @@ public:
             float revL = 0.0f, revR = 0.0f;
             reverb.processSample(dryL, dryR, revL, revR);
 
+            // Shaped before it is mixed, so only the tail is affected and the
+            // dry voice keeps its own low end intact.
+            revL = reverbAir.processSample(0, reverbHP.processSample(0, revL));
+            revR = reverbAir.processSample(1, reverbHP.processSample(1, revR));
+
             const float dblMix = 0.34f * doubleAmount.getNextValue();
             const float delMix = 0.42f * delayAmount.getNextValue();
             const float space = spaceAmount.getNextValue();
@@ -202,6 +236,16 @@ private:
 
     FractionalDelay doubleLeft, doubleRight;
     DuckingDelay delay;
+    void applyReverbTone()
+    {
+        // Full body still cuts at 90 Hz: nothing a vocal reverb puts below that
+        // is worth the mix space it takes.
+        reverbHP.setHighPass(90.0 + 260.0 * (1.0 - static_cast<double>(body)), 0.707);
+        reverbAir.setHighShelf(6000.0, static_cast<double>(airDb));
+    }
+
+    Biquad reverbHP, reverbAir;
+    float body = 0.5f, airDb = 0.0f;
     FDNReverb reverb;
 
     Biquad doubleHP, doubleLP;
