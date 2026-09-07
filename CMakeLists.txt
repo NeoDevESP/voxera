@@ -37,22 +37,17 @@ FetchContent_MakeAvailable(rubberband)
 
 juce_add_plugin(VOXERA
     COMPANY_NAME "Trevor Deey Labs"
-    # Identity is deliberately different from 0.8's. A VST3's unique id is
-    # derived from these codes, so leaving PLUGIN_CODE as Vx01 would make a host
-    # treat this build as the same plugin as the frozen 0.8 and show only one of
-    # them. Changing it lets both sit in the rack at once, which is the point:
-    # 0.8 stays as the reference that sounds right, and this is what gets
-    # compared against it.
-    BUNDLE_ID "com.trevordeey.voxera1"
+    # A third distinct identity. The unique id a host uses is derived from these
+    # codes, so each build that should appear separately in the rack needs its
+    # own: Vx01 is the frozen 0.8, Vx10 the first development build, and Vx20
+    # this one. Reusing a code would make the host update that entry instead of
+    # adding a new plugin, and would leave two files claiming one id.
+    BUNDLE_ID "com.trevordeey.voxerachop"
     PLUGIN_MANUFACTURER_CODE Tdly
-    PLUGIN_CODE Vx10
+    PLUGIN_CODE Vx20
     # AU is macOS-only and JUCE drops it elsewhere, but without it Logic Pro and
     # GarageBand cannot see the plugin at all: neither host loads VST3.
     FORMATS VST3 AU Standalone
-    # Renamed from VOXERA1, but PLUGIN_CODE stays Vx10 on purpose: the unique id
-    # is derived from that, so keeping it means a host updates the entry it
-    # already has instead of listing a third plugin. The old VOXERA1.vst3 file
-    # has to be deleted on install, or two files would claim the same id.
     PRODUCT_NAME "VOXERA+CHOP"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE

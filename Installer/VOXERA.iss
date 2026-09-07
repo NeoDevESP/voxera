@@ -1,8 +1,9 @@
 #define AppVersion "1.0.0-beta"
 [Setup]
-; A distinct AppId from 0.8's, or installing this would be treated as an upgrade
-; and remove the build that is being kept as the reference.
-AppId={{2F1C8D46-7B03-4E59-A6D2-5C48E9137AB1}
+; Its own AppId. Sharing one with either earlier build would make Windows treat
+; this install as an upgrade of that build and uninstall it, which defeats the
+; point of keeping them side by side.
+AppId={{7A4E9C21-D850-4F63-B19E-3D62A0F5C748}
 AppName=VOXERA+CHOP
 AppVersion={#AppVersion}
 AppPublisher=Trevor Deey Labs

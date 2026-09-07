@@ -48,9 +48,9 @@ jobs:
           killall -9 AudioComponentRegistrar 2>/dev/null || true
           # Apple's own validator, and the gate Logic applies before it will
           # load a component at all.
-          # Subtype must match PLUGIN_CODE in CMakeLists, which is Vx10 now that
-          # 0.8 keeps Vx01 so the two can coexist in a host.
-          auval -v aufx Vx10 Tdly
+          # Subtype must match PLUGIN_CODE in CMakeLists. Vx01 is the frozen 0.8
+          # and Vx10 the first development build; this one is Vx20.
+          auval -v aufx Vx20 Tdly
 
       - name: Package
         run: |
