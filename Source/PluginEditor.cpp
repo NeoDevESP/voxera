@@ -491,5 +491,5 @@ void VoxeraAudioProcessorEditor::paint(juce::Graphics& g)
     g.setFont(font(10)); g.setColour(ink);
     g.drawText("VOXERA AUDIO LABS", 60, 803, 250, 23, juce::Justification::left);
     g.drawText("A MORE EXPRESSIVE YOU", 420, 803, 360, 23, juce::Justification::centred);
-    g.drawText("v0.8.0  |  SMART EQ", 880, 803, 265, 23, juce::Justification::right);
+    g.drawText("v" JucePlugin_VersionString "  |  CHOP", 880, 803, 265, 23, juce::Justification::right);
 }
