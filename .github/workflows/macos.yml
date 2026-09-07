@@ -4,7 +4,8 @@ on:
   push:
   pull_request:
 permissions:
-  contents: read
+  # Writing is needed only to attach the built plugins to a release.
+  contents: write
 jobs:
   macos:
     # Apple Silicon runner. The SDK it carries contains both slices, so one
@@ -95,6 +96,23 @@ jobs:
           name: VOXERA-0.8.0-macOS-universal
           if-no-files-found: error
           path: artifacts/
+
+      # Action artifacts can only be downloaded by someone signed in to GitHub,
+      # which makes them useless for handing a build to another person. Release
+      # assets have plain public URLs, so a tag is what actually produces
+      # something shareable.
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" \
+              --title "VOXERA $TAG - macOS" \
+              --notes "Universal build (Apple Silicon + Intel), validated with pluginval and auval. Not code signed: see LEEME.txt for the quarantine step."
+          gh release upload "$TAG" artifacts/* --clobber
 
       - name: Upload test evidence
         if: always()
