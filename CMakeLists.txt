@@ -87,6 +87,8 @@ target_sources(VOXERA PRIVATE
     Source/DSP/Optical.h
     Source/DSP/Upward.h
     Source/DSP/VocalLock.h
+    Source/DSP/Chop.h
+    Source/DSP/Modulation.h
     Source/DSP/SoftClip.h
     Source/DSP/Character.h
     Source/DSP/AutoMix.h

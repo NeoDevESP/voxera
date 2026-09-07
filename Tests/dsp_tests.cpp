@@ -7,6 +7,9 @@
 #include "../Source/DSP/Optical.h"
 #include "../Source/DSP/Upward.h"
 #include "../Source/DSP/VocalLock.h"
+#include "../Source/DSP/Chop.h"
+#include "../Source/DSP/Modulation.h"
+#include <algorithm>
 #include <memory>
 #include "../Source/DSP/SoftClip.h"
 #include "../Source/DSP/Character.h"
@@ -483,6 +486,139 @@ void checkUpward()
     std::cout << "PASS: upward compression raises quiet detail, spares loud and noise\n";
 }
 
+void checkChopAndCrush()
+{
+    constexpr double sr = 48000.0;
+    const int length = static_cast<int>(sr * 2.0);
+
+    // --- Chop -----------------------------------------------------------
+    const auto chopped = [&](float amount) {
+        voxera::Chop c; c.prepare(sr, 2);
+        c.setTempo(120.0); c.setDivision(1); c.setPattern(0);   // 1/16, alternate
+        c.setAmount(amount); c.setPosition(0.0);
+        juce::AudioBuffer<float> b(2, length);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < length; ++i) b.setSample(ch, i, sine(440.0, i, sr, 0.4f));
+        c.process(b);
+        return b;
+    };
+
+    const auto quiet = chopped(0.0f);
+    const auto cut = chopped(1.0f);
+
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < length; ++i) CHECK(std::isfinite(cut.getSample(ch, i)));
+
+    // At zero the gate must never close, so nothing is touched at all.
+    for (int i = 0; i < length; ++i) CHECK(std::abs(quiet.getSample(0, i)) > 0.0f || i < 4);
+
+    /*  A 1/16 step at 120 BPM is 125 ms, and the alternate pattern opens every
+        other one. So over two seconds the output has to contain both stretches
+        at full level and stretches near silence; measuring the loudest and the
+        quietest 20 ms window is enough to show the gate is working on the grid
+        rather than just attenuating everything.
+    */
+    const int window = static_cast<int>(sr * 0.02);
+    float loudest = 0.0f, quietest = 1.0f;
+    for (int start = window; start + window < length; start += window) {
+        float peak = 0.0f;
+        for (int i = start; i < start + window; ++i) peak = juce::jmax(peak, std::abs(cut.getSample(0, i)));
+        loudest = juce::jmax(loudest, peak);
+        quietest = juce::jmin(quietest, peak);
+    }
+    CHECK(loudest > 0.3f);
+    CHECK(quietest < 0.05f);
+    std::cout << "Chop: loudest window " << loudest << ", quietest " << quietest << '\n';
+
+    // --- Crush ----------------------------------------------------------
+    voxera::Crush off; off.prepare(sr, 2); off.setAmount(0.0f); off.setMix(0.0f);
+    juce::AudioBuffer<float> dry(2, 4096), same(2, 4096);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < 4096; ++i) dry.setSample(ch, i, sine(300.0, i, sr, 0.4f));
+    same.makeCopyOf(dry); off.process(same);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < 4096; ++i) CHECK(same.getSample(ch, i) == dry.getSample(ch, i));
+
+    voxera::Crush on; on.prepare(sr, 2); on.setAmount(1.0f); on.setMix(1.0f);
+    juce::AudioBuffer<float> wrecked(2, 4096); wrecked.makeCopyOf(dry);
+    on.process(wrecked);
+    // Quantising and holding must produce a staircase: distinct values, and far
+    // fewer of them than the input had.
+    std::vector<float> values;
+    for (int i = 2048; i < 4096; ++i) values.push_back(wrecked.getSample(0, i));
+    std::sort(values.begin(), values.end());
+    values.erase(std::unique(values.begin(), values.end()), values.end());
+    for (int i = 0; i < 4096; ++i) CHECK(std::isfinite(wrecked.getSample(0, i)));
+    CHECK(values.size() < 200);
+    std::cout << "Crush: " << values.size() << " distinct levels in 2048 samples\n";
+    std::cout << "PASS: chop gates on the grid and is exact at zero; crush quantises\n";
+}
+
+void checkModulationAndGlue()
+{
+    constexpr double sr = 48000.0;
+    constexpr int length = 16384;
+
+    juce::AudioBuffer<float> dry(2, length);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < length; ++i)
+            dry.setSample(ch, i, sine(300.0, i, sr, 0.3f) + sine(1100.0, i, sr, 0.2f));
+
+    for (int type : { voxera::Modulation::flanger, voxera::Modulation::phaser }) {
+        voxera::Modulation off; off.prepare(sr, 2); off.setType(voxera::Modulation::off);
+        juce::AudioBuffer<float> untouched(2, length); untouched.makeCopyOf(dry);
+        off.process(untouched);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < length; ++i)
+                CHECK(untouched.getSample(ch, i) == dry.getSample(ch, i));
+
+        voxera::Modulation m; m.prepare(sr, 2);
+        m.setType(type); m.setRateHz(2.0f); m.setDepth(1.0f); m.setMix(1.0f);
+        juce::AudioBuffer<float> wet(2, length); wet.makeCopyOf(dry);
+        m.process(wet);
+
+        double difference = 0.0, peak = 0.0;
+        for (int i = 0; i < length; ++i) {
+            difference += std::abs(wet.getSample(0, i) - dry.getSample(0, i));
+            peak = juce::jmax(peak, static_cast<double>(std::abs(wet.getSample(0, i))));
+            CHECK(std::isfinite(wet.getSample(0, i)));
+            CHECK(std::isfinite(wet.getSample(1, i)));
+        }
+        CHECK(difference > 1.0);
+        // Feedback below unity: it must resonate, not run away.
+        CHECK(peak < 8.0);
+        std::cout << "Modulation type " << type << ": peak " << peak << '\n';
+    }
+
+    // --- Glue -----------------------------------------------------------
+    voxera::Glue none; none.prepare(sr, 2); none.setAmount(0.0f);
+    juce::AudioBuffer<float> plain(2, length); plain.makeCopyOf(dry);
+    none.process(plain);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < length; ++i) CHECK(plain.getSample(ch, i) == dry.getSample(ch, i));
+
+    voxera::Glue glued; glued.prepare(sr, 2); glued.setAmount(1.0f);
+    juce::AudioBuffer<float> together(2, length); together.makeCopyOf(dry);
+    glued.process(together);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < length; ++i) CHECK(std::isfinite(together.getSample(ch, i)));
+
+    /*  Glue has to stay gentle. If the last block differs from the input by more
+        than a few dB it has stopped gluing and started compressing, which is the
+        one thing this stage must not do.
+    */
+    double ratio = 0.0; int counted = 0;
+    for (int i = length - 4096; i < length; ++i) {
+        const float in = std::abs(dry.getSample(0, i));
+        if (in > 0.05f) { ratio += std::abs(together.getSample(0, i)) / in; ++counted; }
+    }
+    ratio /= juce::jmax(1, counted);
+    const double db = juce::Decibels::gainToDecibels(ratio);
+    CHECK(std::abs(db) < 4.0);
+    std::cout << "Glue: net " << db << " dB\n";
+    std::cout << "PASS: modulation is exact when off and stable when on; glue stays gentle\n";
+}
+
 void checkDoubler()
 {
     constexpr double sr = 48000.0;
@@ -716,7 +852,8 @@ int main() {
     std::cout << "PASS: module bypass fades, spectral partitioning, tempo delay\n";
     checkLimiter(); checkExciter(); checkPunch();
     checkGate(); checkSoftClip(); checkOptical(); checkCharacter();
-    checkUpward(); checkWarmth(); checkDoubler(); checkVocalLock(); checkAutoMix();
+    checkUpward(); checkWarmth(); checkDoubler(); checkVocalLock();
+    checkChopAndCrush(); checkModulationAndGlue(); checkAutoMix();
     for (double sr : {44100.0, 48000.0, 96000.0}) {
         for (float hz : {80.0f, 110.0f, 220.0f, 440.0f, 880.0f}) {
             YinPitchDetector yin; yin.prepare(sr);

@@ -17,6 +17,8 @@
 #include "DSP/Optical.h"
 #include "DSP/Upward.h"
 #include "DSP/VocalLock.h"
+#include "DSP/Chop.h"
+#include "DSP/Modulation.h"
 #include "DSP/SoftClip.h"
 #include "DSP/Character.h"
 #include "DSP/AutoMix.h"
@@ -171,6 +173,16 @@ private:
         std::atomic<float>* satWarmth {};
         std::atomic<float>* reverbBody {};
         std::atomic<float>* reverbAir {};
+        std::atomic<float>* chopAmount {};
+        std::atomic<float>* chopDivision {};
+        std::atomic<float>* chopPattern {};
+        std::atomic<float>* crush {};
+        std::atomic<float>* crushMix {};
+        std::atomic<float>* modType {};
+        std::atomic<float>* modRate {};
+        std::atomic<float>* modDepth {};
+        std::atomic<float>* modMix {};
+        std::atomic<float>* glue {};
     } prm;
 
     // The chain can report two different latencies. Both are worked out once in
@@ -211,6 +223,10 @@ private:
     voxera::Punch punch;
     voxera::Exciter exciter;
     voxera::Character character;
+    voxera::Crush crush;
+    voxera::Modulation modulation;
+    voxera::Chop chop;
+    voxera::Glue glue;
     voxera::SoftClip softClip;
     voxera::Limiter limiter;
 

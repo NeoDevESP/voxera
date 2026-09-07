@@ -69,6 +69,17 @@ namespace ParamIDs
     static constexpr auto satWarmth = "satWarmth";
     static constexpr auto reverbBody = "reverbBody";
     static constexpr auto reverbAir = "reverbAir";
+
+    static constexpr auto chopAmount = "chopAmount";
+    static constexpr auto chopDivision = "chopDivision";
+    static constexpr auto chopPattern = "chopPattern";
+    static constexpr auto crush = "crush";
+    static constexpr auto crushMix = "crushMix";
+    static constexpr auto modType = "modType";
+    static constexpr auto modRate = "modRate";
+    static constexpr auto modDepth = "modDepth";
+    static constexpr auto modMix = "modMix";
+    static constexpr auto glue = "glue";
 }
 
 VoxeraAudioProcessor::VoxeraAudioProcessor()
@@ -144,6 +155,16 @@ void VoxeraAudioProcessor::bindParameters()
     prm.satWarmth = bind(ParamIDs::satWarmth);
     prm.reverbBody = bind(ParamIDs::reverbBody);
     prm.reverbAir = bind(ParamIDs::reverbAir);
+    prm.chopAmount = bind(ParamIDs::chopAmount);
+    prm.chopDivision = bind(ParamIDs::chopDivision);
+    prm.chopPattern = bind(ParamIDs::chopPattern);
+    prm.crush = bind(ParamIDs::crush);
+    prm.crushMix = bind(ParamIDs::crushMix);
+    prm.modType = bind(ParamIDs::modType);
+    prm.modRate = bind(ParamIDs::modRate);
+    prm.modDepth = bind(ParamIDs::modDepth);
+    prm.modMix = bind(ParamIDs::modMix);
+    prm.glue = bind(ParamIDs::glue);
 }
 
 /*  Parameters are grouped so hosts and the advanced page show a structured tree
@@ -266,7 +287,26 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxeraAudioProcessor::create
         group("tone", "Tone",
             number(ParamIDs::satWarmth, "Warmth", { 0.0f, 100.0f, 0.1f }, 0.0f),
             number(ParamIDs::reverbBody, "Reverb Body", { 0.0f, 100.0f, 0.1f }, 50.0f),
-            number(ParamIDs::reverbAir, "Reverb Air", { -8.0f, 8.0f, 0.1f }, 0.0f)));
+            number(ParamIDs::reverbAir, "Reverb Air", { -8.0f, 8.0f, 0.1f }, 0.0f)),
+
+        group("chop", "Chop",
+            number(ParamIDs::chopAmount, "Chop", { 0.0f, 100.0f, 0.1f }, 0.0f),
+            choice(ParamIDs::chopDivision, "Chop Rate", { "1/8", "1/16", "1/4", "1/8T" }, 1),
+            choice(ParamIDs::chopPattern, "Chop Pattern",
+                { "Alternate", "Offbeat", "Stutter", "Broken" }, 0)),
+
+        group("crush", "Crush",
+            number(ParamIDs::crush, "Crush", { 0.0f, 100.0f, 0.1f }, 0.0f),
+            number(ParamIDs::crushMix, "Crush Mix", { 0.0f, 100.0f, 0.1f }, 100.0f)),
+
+        group("mod", "Modulation",
+            choice(ParamIDs::modType, "Mod Type", { "Off", "Flanger", "Phaser" }, 0),
+            number(ParamIDs::modRate, "Mod Rate", { 0.02f, 8.0f, 0.01f, 0.4f }, 0.4f),
+            number(ParamIDs::modDepth, "Mod Depth", { 0.0f, 100.0f, 0.1f }, 50.0f),
+            number(ParamIDs::modMix, "Mod Mix", { 0.0f, 100.0f, 0.1f }, 0.0f)),
+
+        group("glue", "Glue",
+            number(ParamIDs::glue, "Glue", { 0.0f, 100.0f, 0.1f }, 0.0f)));
 
     return layout;
 }
@@ -301,6 +341,10 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     punch.prepare(spec);
     exciter.prepare(sampleRate, getTotalNumOutputChannels());
     character.prepare(sampleRate, getTotalNumOutputChannels());
+    crush.prepare(sampleRate, getTotalNumOutputChannels());
+    modulation.prepare(sampleRate, getTotalNumOutputChannels());
+    chop.prepare(sampleRate, getTotalNumOutputChannels());
+    glue.prepare(sampleRate, getTotalNumOutputChannels());
     softClip.prepare(sampleRate, getTotalNumOutputChannels());
     saturator.prepare(spec);
     spatialEngine.prepare(sampleRate, getTotalNumOutputChannels());
@@ -360,6 +404,10 @@ void VoxeraAudioProcessor::releaseResources()
     punch.reset();
     exciter.reset();
     character.reset();
+    crush.reset();
+    modulation.reset();
+    chop.reset();
+    glue.reset();
     softClip.reset();
     limiter.reset();
 }
@@ -632,14 +680,40 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     exciter.process(buffer);
 
     double bpm = 120.0;
+    // Negative means the host offered no musical position; the chop falls back
+    // to counting rather than pretending it knows where the bar is.
+    double ppq = -1.0;
     if (auto* playHead = getPlayHead())
     {
         if (auto position = playHead->getPosition())
         {
             if (auto hostBpm = position->getBpm())
                 bpm = *hostBpm;
+            if (auto hostPpq = position->getPpqPosition())
+                ppq = *hostPpq;
         }
     }
+
+    // Destruction before movement before rhythm: the crush is a tone, the
+    // modulation moves that tone, and the chop cuts the result into the bar.
+    crush.setAmount(prm.crush->load() * 0.01f);
+    crush.setMix(prm.crushMix->load() * 0.01f);
+    crush.process(buffer);
+
+    modulation.setType(static_cast<int>(std::lround(prm.modType->load())));
+    modulation.setRateHz(prm.modRate->load());
+    modulation.setDepth(prm.modDepth->load() * 0.01f);
+    modulation.setMix(prm.modMix->load() * 0.01f);
+    modulation.process(buffer);
+
+    // Ahead of the spatial stage on purpose, so the reverb and delay ring on
+    // through the closed steps instead of being cut off with them.
+    chop.setTempo(bpm);
+    chop.setPosition(ppq);
+    chop.setDivision(static_cast<int>(std::lround(prm.chopDivision->load())));
+    chop.setPattern(static_cast<int>(std::lround(prm.chopPattern->load())));
+    chop.setAmount(prm.chopAmount->load() * 0.01f);
+    chop.process(buffer);
 
     spatialEngine.setEnabled(prm.spatialOn->load() > 0.5f);
     spatialEngine.setTempo(bpm);
@@ -653,6 +727,11 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     spatialEngine.setReverbAirDb(prm.reverbAir->load());
     spatialEngine.setDuck(prm.duck->load() * 0.01f);
     spatialEngine.process(buffer);
+
+    // Last thing that shapes dynamics, and after the spatial stage so the tails
+    // move with the voice rather than on their own envelope.
+    glue.setAmount(prm.glue->load() * 0.01f);
+    glue.process(buffer);
 
     const float outDb = prm.outputDb->load();
     outputGain.setTargetValue(juce::Decibels::decibelsToGain(outDb));
