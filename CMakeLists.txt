@@ -251,6 +251,18 @@ if(VOXERA_BUILD_TESTS)
     add_executable(VOXERA_RealtimeTests Tests/realtime_tests.cpp)
     add_test(NAME pitch_control COMMAND VOXERA_AlgorithmTests)
     add_test(NAME realtime_utilities COMMAND VOXERA_RealtimeTests)
+    # Offline renderer: the whole chain applied to a real recording.
+    #
+    # Built with the tests rather than beside them because it is the same kind
+    # of thing — an instrument for finding out what the code does — and because
+    # it must never end up inside anything that ships. Every measurement in this
+    # project until now has been taken on synthetic material, which cannot
+    # answer what the chain does to a voice.
+    add_executable(VOXERA_Render Tools/Render.cpp)
+    target_include_directories(VOXERA_Render PRIVATE Tests/headers ${rubberband_SOURCE_DIR})
+    target_compile_definitions(VOXERA_Render PRIVATE JucePlugin_Name="VOXERA" NAM_SAMPLE_FLOAT=1)
+    target_link_libraries(VOXERA_Render PRIVATE VOXERA RTNeural juce::juce_audio_utils juce::juce_dsp)
+
     add_executable(VOXERA_DetectorBenchmark Tests/detector_benchmark.cpp)
     target_include_directories(VOXERA_DetectorBenchmark PRIVATE Tests/headers ${rubberband_SOURCE_DIR})
     target_link_libraries(VOXERA_DetectorBenchmark PRIVATE VOXERA RTNeural juce::juce_audio_utils juce::juce_dsp)

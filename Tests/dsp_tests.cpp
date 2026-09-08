@@ -1443,7 +1443,58 @@ void checkPitchEngines()
     std::cout << "PASS: both pitch engines report the latency they actually have\n";
 }
 
+/*  Every gain-reduction meter reports the same sign.
+
+    Two of these stages used to store the gain change and two the reduction,
+    behind one accessor name, and the editor cancelled the difference with a
+    minus sign at one call site out of four. Nothing failed, because the only
+    consumer had been adjusted to each stage individually — the cost lands on
+    whatever reads them next, which is exactly what happened when the offline
+    renderer reported the gate as lifting twelve decibels.
+*/
+void checkReductionSigns()
+{
+    constexpr double sr = 48000.0;
+    constexpr int length = 24000;
+
+    juce::AudioBuffer<float> loud(2, length);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < length; ++i) loud.setSample(ch, i, sine(300.0, i, sr, 0.9f));
+
+    voxera::Limiter limiter; limiter.prepare(sr, 2);
+    limiter.setCeilingDb(-12.0f);
+    { juce::AudioBuffer<float> work(2, length); work.makeCopyOf(loud); limiter.process(work); }
+
+    voxera::Optical optical; optical.prepare(sr, 2); optical.setAmount(1.0f);
+    { juce::AudioBuffer<float> work(2, length); work.makeCopyOf(loud); optical.process(work); }
+
+    voxera::ColourCompressor comp; comp.prepare(sr, 2);
+    comp.setThresholdDb(-30.0f); comp.setRatio(8.0f);
+    { juce::AudioBuffer<float> work(2, length); work.makeCopyOf(loud); comp.process(work); }
+
+    // Silence through an open gate: it closes, so it reduces.
+    voxera::Gate gate; gate.prepare(sr, 2);
+    gate.setEnabled(true);
+    gate.setThresholdDb(-30.0f);
+    // Loud first so it opens, then silence so it has something to close on.
+    { juce::AudioBuffer<float> work(2, length); work.makeCopyOf(loud); gate.process(work); }
+    { juce::AudioBuffer<float> quiet(2, length); quiet.clear(); gate.process(quiet); }
+
+    std::cout << "Reduction reported: gate " << gate.getReductionDb()
+              << ", compressor " << comp.getReductionDb()
+              << ", optical " << optical.getReductionDb()
+              << ", limiter " << limiter.getReductionDb() << " dB" << std::endl;
+
+    // All four positive, all four meaning the same thing.
+    CHECK(gate.getReductionDb() > 0.0f);
+    CHECK(comp.getReductionDb() > 0.0f);
+    CHECK(optical.getReductionDb() > 0.0f);
+    CHECK(limiter.getReductionDb() > 0.0f);
+    std::cout << "PASS: every stage reports reduction as a positive number of decibels" << std::endl;
+}
+
 int main() {
+    checkReductionSigns();
     checkPsola();
     checkPitchEngines();
     checkSmartEQ();

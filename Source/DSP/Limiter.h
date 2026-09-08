@@ -142,7 +142,17 @@ public:
             worst = juce::jmin(worst, gain);
         }
 
-        reductionDb.store(juce::Decibels::gainToDecibels(worst), std::memory_order_relaxed);
+        /*  Stored as a positive number of decibels of reduction, which is
+            what the name says and what every other stage here reports.
+
+            It used to store the gain change instead, so a reduction was
+            negative while the compressor and the optical stage next to it made
+            it positive — two conventions behind one accessor name. The editor
+            worked around that with a minus sign at one call site out of four,
+            which meant the inconsistency was invisible until something else
+            read the same values and got them backwards.
+        */
+        reductionDb.store(-juce::Decibels::gainToDecibels(worst), std::memory_order_relaxed);
     }
 
 private:

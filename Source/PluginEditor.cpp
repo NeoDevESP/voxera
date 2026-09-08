@@ -561,10 +561,10 @@ void VoxeraAudioProcessorEditor::paint(juce::Graphics& g)
         // Cells are narrower than their spacing, so each figure has clear air
         // before the next label rather than running straight into it.
         const float x0 = 242.0f, w = 140.0f, pitch = 152.0f, y = 124.0f, h = 18.0f;
-        drawWorking(g, {x0,                 y, w, h}, "GATE",    processor.gateReductionDb(), 40.0f);
+        drawWorking(g, {x0,                 y, w, h}, "GATE",    -processor.gateReductionDb(), 40.0f);
         drawWorking(g, {x0 + pitch,         y, w, h}, "OPT",     -processor.opticalReductionDb(), 12.0f);
         drawWorking(g, {x0 + 2.0f * pitch,  y, w, h}, "DENS",    processor.densityLiftDb(), 12.0f);
-        drawWorking(g, {x0 + 3.0f * pitch,  y, w, h}, "LIMIT",   processor.limiterReductionDb(), 6.0f);
+        drawWorking(g, {x0 + 3.0f * pitch,  y, w, h}, "LIMIT",   -processor.limiterReductionDb(), 6.0f);
         drawWorking(g, {x0 + 4.0f * pitch,  y, w, h}, "LOCK Hz", processor.lockMudHz(), 700.0f);
     }
     if (activePage != 4) {
