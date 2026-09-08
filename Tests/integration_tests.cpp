@@ -154,18 +154,46 @@ int main(int argc, char** argv)
         const auto scratch = juce::File(argc > 1 ? argv[1] : "voxera-neural-test");
         scratch.createDirectory();
 
-        const int hidden = 2;
-        // Order: W (1 x 4H), U (H x 4H), gate biases (4H), head (H), head bias.
+        const int hidden = 3;
+        const int gates = 4 * hidden;
+        const int stride = 1 + hidden;   // one input column, then the hidden ones
+
+        /*  Written in the layout NAM actually uses, with weights chosen so that
+            layout is observable.
+
+            The fixture this replaces set every gate weight to zero. That made
+            the test unable to fail for two independent reasons: it laid the
+            numbers out the way the loader read them rather than the way NAM
+            writes them, and even had it not, all-zero matrices are identical
+            whether you read them interleaved or in separate blocks, so the
+            distinction under test left no trace in the output. The gates were
+            also driven hard into saturation, which throws away whatever
+            differences did survive.
+
+            So: distinct non-zero weights throughout, small enough that no gate
+            saturates, and initial states set far from zero so that a loader
+            which forgets to step over them reads them as head weights and
+            gives an obviously different answer.
+        */
+        std::vector<double> combined(static_cast<size_t>(gates * stride));
+        for (int r = 0; r < gates; ++r)
+            for (int c = 0; c < stride; ++c)
+                combined[static_cast<size_t>(r * stride + c)] = 0.05 * (r + 1) + 0.02 * (c + 1);
+
+        std::vector<double> gateBias(static_cast<size_t>(gates));
+        for (int r = 0; r < gates; ++r) gateBias[static_cast<size_t>(r)] = -0.3 + 0.05 * r;
+
+        std::vector<double> head(static_cast<size_t>(hidden));
+        for (int h = 0; h < hidden; ++h) head[static_cast<size_t>(h)] = 0.06 + 0.02 * h;
+        const double headBias = 0.01;
+
         std::vector<double> weights;
-        for (int i = 0; i < 4 * hidden; ++i) weights.push_back(0.0);              // W
-        for (int i = 0; i < hidden * 4 * hidden; ++i) weights.push_back(0.0);     // U
-        // Gates i, f, g, o. Large positive g and o, so tanh and sigmoid saturate
-        // towards one and the cell fills on the first step.
-        const double gateBias[4] { 4.0, -4.0, 4.0, 4.0 };
-        for (int g = 0; g < 4; ++g)
-            for (int h = 0; h < hidden; ++h) weights.push_back(gateBias[g]);
-        for (int h = 0; h < hidden; ++h) weights.push_back(0.5);                  // head
-        weights.push_back(0.25);                                                  // head bias
+        weights.insert(weights.end(), combined.begin(), combined.end());
+        weights.insert(weights.end(), gateBias.begin(), gateBias.end());
+        for (int h = 0; h < hidden; ++h) weights.push_back(5.0 + h);   // initial hidden
+        for (int h = 0; h < hidden; ++h) weights.push_back(8.0 + h);   // initial cell
+        weights.insert(weights.end(), head.begin(), head.end());
+        weights.push_back(headBias);
 
         juce::String json = "{\"architecture\":\"LSTM\",\"config\":{\"num_layers\":1,"
                             "\"input_size\":1,\"hidden_size\":" + juce::String(hidden)
@@ -184,25 +212,160 @@ int main(int argc, char** argv)
         CHECK(loaded.ok);
         CHECK(n.hasNeuralModel());
 
+        /*  Everything but the network turned off, so the number that comes out
+            is the network's and nothing else's.
+
+            The previous version silenced five stages and left the rest at their
+            defaults — the compressor, the de-esser, the doubler, the delay, the
+            width — then compared against a tolerance wide enough to swallow
+            what they did. That is two mistakes propping each other up: the
+            chain was not isolated, and the tolerance was loose enough that
+            nobody had to notice.
+        */
         set(n, "neuralMix", 100.0f);
         for (const auto* id : { "pitchOn", "spectralOn", "spatialOn", "gateOn", "limiterOn" })
             set(n, id, 0.0f);
-        set(n, "autoGain", 0.0f);
-        set(n, "satMix", 0.0f);
-        set(n, "smartEQAmount", 0.0f);
+        for (const auto* id : { "autoGain", "satMix", "smartEQAmount", "clean", "deEss",
+                                "width", "doubler", "delayMix", "punch", "exciter",
+                                "optical", "glue", "vocalLock", "voiceMatch",
+                                "density", "clipAmount", "satWarmth", "autoVoice",
+                                "modMix", "chopAmount", "crush", "space", "duck" })
+            set(n, id, 0.0f);
+        // Ratio one is not enough on its own: the compressor's character stages
+        // add drive whatever the ratio says, which on a steady input shows up as
+        // a shifted level rather than as anything recognisable as compression.
+        set(n, "compRatio", 1.0f);
+        set(n, "compType", 0.0f);      // Clean: no drive, no bend, no even harmonics
+        set(n, "toneMacro", 0.0f);
         n.prepareToPlay(48000.0, 256);
 
         juce::AudioBuffer<float> b(2, 256);
         for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < 256; ++i) b.setSample(ch, i, 0.1f);
         for (int block = 0; block < 40; ++block) n.processBlock(b, midi);
 
-        /*  Every gate is saturated, so after many steps each hidden unit sits at
-            tanh(1) and the head gives H * 0.5 * tanh(1) + 0.25.
+        /*  The expected value, worked out here rather than read off the loader.
+
+            This is the whole point of the rewrite. An LSTM step is short enough
+            to write out in full, so the test can compute what the network in
+            that file settles to under a constant input without consulting the
+            code it is testing. A fixture that agrees with the loader by
+            construction proves only that the loader agrees with itself, which
+            is exactly what the previous version of this test established while
+            the loader read the format wrong.
+
+            Gates in NAM's order: input, forget, cell candidate, output.
         */
-        const double expected = hidden * 0.5 * std::tanh(1.0) + 0.25;
-        const double got = b.getSample(0, 255);
-        std::cout << "NEURAL output: " << got << " expected about " << expected << "\n";
-        CHECK(std::abs(got - expected) < 0.05);
+        const auto sigmoid = [](double v) { return 1.0 / (1.0 + std::exp(-v)); };
+        std::vector<double> h(static_cast<size_t>(hidden), 0.0), c(static_cast<size_t>(hidden), 0.0);
+        const double x = 0.1;   // the DC fed through the plugin below
+
+        /*  Exactly as many steps as the plugin took, not "enough to converge".
+
+            The recurrent state advances once per sample from the moment the
+            model loads, so after forty blocks of 256 it has taken 10240 steps
+            and no more. Running the reference to its fixed point instead
+            compares two different moments in the same trajectory and calls the
+            gap a bug — which is what happened here: the first mismatch this
+            test reported was my own impatience, not the loader.
+        */
+        for (int step = 0; step < 40 * 256; ++step) {
+            std::vector<double> z(static_cast<size_t>(gates));
+            for (int r = 0; r < gates; ++r) {
+                double sum = combined[static_cast<size_t>(r * stride)] * x
+                           + gateBias[static_cast<size_t>(r)];
+                for (int k = 0; k < hidden; ++k)
+                    sum += combined[static_cast<size_t>(r * stride + 1 + k)] * h[static_cast<size_t>(k)];
+                z[static_cast<size_t>(r)] = sum;
+            }
+            for (int k = 0; k < hidden; ++k) {
+                const double gi = sigmoid(z[static_cast<size_t>(k)]);
+                const double gf = sigmoid(z[static_cast<size_t>(hidden + k)]);
+                const double gg = std::tanh(z[static_cast<size_t>(2 * hidden + k)]);
+                const double go = sigmoid(z[static_cast<size_t>(3 * hidden + k)]);
+                c[static_cast<size_t>(k)] = gf * c[static_cast<size_t>(k)] + gi * gg;
+                h[static_cast<size_t>(k)] = go * std::tanh(c[static_cast<size_t>(k)]);
+            }
+        }
+
+        double expected = headBias;
+        for (int k = 0; k < hidden; ++k) expected += head[static_cast<size_t>(k)] * h[static_cast<size_t>(k)];
+
+        /*  Before believing the number, check the path that carried it.
+
+            Comparing the plugin's output against a hand-computed network only
+            means something if everything around the network passes the signal
+            through untouched. Asserting that separately is what turns a
+            mismatch from a mystery into a location: if this passes and the next
+            one fails, the loader is wrong; if this fails, the test is.
+        */
+        VoxeraAudioProcessor plain;
+        CHECK(plain.loadNeuralModel(file).ok);
+        set(plain, "neuralMix", 0.0f);
+        for (const auto* id : { "pitchOn", "spectralOn", "spatialOn", "gateOn", "limiterOn" })
+            set(plain, id, 0.0f);
+        for (const auto* id : { "autoGain", "satMix", "smartEQAmount", "clean", "deEss",
+                                "width", "doubler", "delayMix", "punch", "exciter",
+                                "optical", "glue", "vocalLock", "voiceMatch",
+                                "density", "clipAmount", "satWarmth", "autoVoice",
+                                "modMix", "chopAmount", "crush", "space", "duck" })
+            set(plain, id, 0.0f);
+        set(plain, "compRatio", 1.0f);
+        set(plain, "compType", 0.0f);
+        set(plain, "toneMacro", 0.0f);
+        plain.prepareToPlay(48000.0, 256);
+
+        juce::AudioBuffer<float> flat(2, 256);
+        for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < 256; ++i) flat.setSample(ch, i, 0.1f);
+        for (int block = 0; block < 40; ++block) {
+            for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < 256; ++i) flat.setSample(ch, i, 0.1f);
+            plain.processBlock(flat, midi);
+        }
+        const double throughput = flat.getSample(0, 255);
+        std::cout << "NEURAL chain transparency: 0.1 in, " << throughput << " out\n";
+        CHECK(std::abs(throughput - 0.1) < 0.001);
+
+        /*  The loader checked where the loader lives, not through the chain.
+
+            Driving this from the plugin's input compares the network against a
+            number that has already been through every stage ahead of it, and
+            when the two disagree there is no way to tell which of twenty
+            stages moved it. Measuring the whole chain's transparency does not
+            rescue that: a stage before the network and a stage after it can
+            each be off and still sum to a transparent-looking whole.
+
+            So the network is driven directly, with a known sample going in and
+            the same sample's worth of arithmetic to compare against.
+        */
+        voxera::NeuralStage direct;
+        direct.prepare(48000.0, 256, 1);
+        CHECK(direct.load(file).ok);
+        direct.commitLoad();          // load only stages it; this is what arms it
+        CHECK(direct.hasModel());
+        direct.setMix(1.0f);
+
+        juce::AudioBuffer<float> probe(1, 256);
+        for (int block = 0; block < 40; ++block) {
+            for (int i = 0; i < 256; ++i) probe.setSample(0, i, static_cast<float>(x));
+            direct.process(probe);
+        }
+        const double got = probe.getSample(0, 255);
+
+        std::cout << "NEURAL output: " << got << " expected " << expected << "\n";
+        CHECK(std::abs(got - expected) < 0.001);
+
+        /*  And through the plugin, as a smoke check only.
+
+            Deliberately loose. The stage sits behind everything upstream of it,
+            so the exact figure here belongs to the chain rather than to the
+            loader, and pinning it tightly would only produce a test that fails
+            whenever an unrelated stage changes. What it is worth asserting is
+            that the model is reached at all and does something: silent
+            non-application is the failure mode this catches.
+        */
+        const double throughChain = b.getSample(0, 255);
+        std::cout << "NEURAL through the chain: " << throughChain << "\n";
+        CHECK(std::isfinite(throughChain));
+        CHECK(std::abs(throughChain - 0.1) > 0.01);
 
         /*  The same capture in a session at a different rate.
 

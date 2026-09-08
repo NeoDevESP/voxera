@@ -93,12 +93,22 @@ public:
                 reduction += coeff * (target - reduction);
             }
 
-            // Make-up tracks the control so raising it does not drop the level.
-            const float gain = juce::Decibels::decibelsToGain(-reduction + makeupDb * wet);
+            /*  Both the reduction and the make-up are scaled by the control, so
+                that at zero the stage is arithmetically identity.
+
+                Lowering the threshold alone was not enough and the difference
+                was audible: with the control down the threshold still sat at
+                -10 dB, so an ordinary vocal — which lives well above that —
+                arrived already compressed by a stage the user believed was off.
+                A control at zero has to mean off, not merely gentle.
+            */
+            const float gain = juce::Decibels::decibelsToGain(wet * (makeupDb - reduction));
             for (int ch = 0; ch < channels; ++ch)
                 buffer.getWritePointer(ch)[i] *= gain;
 
-            deepest = juce::jmax(deepest, reduction);
+            // What the meter shows is what was applied, not what the detector
+            // would have applied had the stage been turned on.
+            deepest = juce::jmax(deepest, wet * reduction);
         }
 
         reductionDb.store(deepest, std::memory_order_relaxed);

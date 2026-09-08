@@ -237,13 +237,37 @@ private:
 
     /*  Unpacks a Neural Amp Modeler LSTM capture.
 
-        The file stores every weight in one flat array, in the order the
-        reference implementation writes them: the input-to-hidden and
-        hidden-to-hidden matrices of each layer, then that layer's biases, then
-        finally the head that reduces the hidden state to one sample. NAM orders
-        its gates i, f, g, o, which is the order RTNeural expects as well, so the
-        matrices transfer without rearrangement — only the split points have to
-        be right.
+        The file stores every weight in one flat array. Getting the layout wrong
+        does not fail: the model loads, runs, and produces confident nonsense
+        that sounds like a different amplifier, so the layout is worth stating
+        exactly. Per layer, the reference implementation writes
+
+            the input and hidden weight matrices CONCATENATED SIDE BY SIDE,
+              as one (4*hidden) x (input + hidden) matrix in row order —
+              so each row holds that gate-row's input weights immediately
+              followed by its hidden weights, interleaved all the way down
+            the summed gate biases                              (4 * hidden)
+            the initial hidden state                            (hidden)
+            the initial cell state                              (hidden)
+
+        and then, once per model, the head that reduces the hidden state to one
+        sample, and the head's bias.
+
+        Two things here were wrong for a long time and both were invisible.
+        Reading the two matrices as separate contiguous blocks — which is the
+        obvious reading of "input weights, then hidden weights" — takes the
+        right number of values from the wrong places once the rows interleave.
+        And the initial states sit between the biases and the head, so skipping
+        them silently shifts the head onto somebody else's numbers.
+
+        What hid it was the test: it built its fixture with the same layout the
+        loader assumed, so the two agreed with each other and neither agreed
+        with NAM. The test alongside this now writes the layout documented
+        above and checks the result against an LSTM worked out independently,
+        which is the only version of this test that can fail.
+
+        NAM orders its gates i, f, g, o, which is the order RTNeural expects as
+        well, so the values themselves transfer without rearrangement.
     */
     std::unique_ptr<RTNeural::Model<float>> buildFromNam(const nlohmann::json& json,
                                                          double& rate, juce::String& message)
@@ -269,6 +293,7 @@ private:
         const std::vector<float> weights = json.at("weights").get<std::vector<float>>();
         const size_t expected = static_cast<size_t>(4 * hidden * (inputSize + hidden))  // W and U
                               + static_cast<size_t>(4 * hidden)                          // gate biases
+                              + static_cast<size_t>(2 * hidden)                          // initial h and c
                               + static_cast<size_t>(hidden) + 1;                         // head and its bias
         if (weights.size() < expected) {
             message = "The capture is shorter than its own configuration describes.";
@@ -280,20 +305,46 @@ private:
         auto dense = std::make_unique<RTNeural::Dense<float>>(hidden, 1);
 
         size_t at = 0;
-        const auto take = [&weights, &at](int rows, int columns) {
-            std::vector<std::vector<float>> out(static_cast<size_t>(rows),
-                                                std::vector<float>(static_cast<size_t>(columns)));
-            for (int r = 0; r < rows; ++r)
-                for (int c = 0; c < columns; ++c) out[static_cast<size_t>(r)][static_cast<size_t>(c)] = weights[at++];
-            return out;
-        };
+        const int gates = 4 * hidden;
+        const int stride = inputSize + hidden;
 
-        lstm->setWVals(take(inputSize, 4 * hidden));
-        lstm->setUVals(take(hidden, 4 * hidden));
+        /*  Walked row by row across the combined matrix, splitting each row at
+            the input/hidden boundary. RTNeural wants the transpose of this —
+            indexed by source first and gate second — so the two loops below
+            scatter rather than copy.
+        */
+        std::vector<std::vector<float>> W(static_cast<size_t>(inputSize),
+                                          std::vector<float>(static_cast<size_t>(gates)));
+        std::vector<std::vector<float>> U(static_cast<size_t>(hidden),
+                                          std::vector<float>(static_cast<size_t>(gates)));
+        for (int r = 0; r < gates; ++r) {
+            const size_t row = at + static_cast<size_t>(r) * static_cast<size_t>(stride);
+            for (int i = 0; i < inputSize; ++i)
+                W[static_cast<size_t>(i)][static_cast<size_t>(r)] = weights[row + static_cast<size_t>(i)];
+            for (int h = 0; h < hidden; ++h)
+                U[static_cast<size_t>(h)][static_cast<size_t>(r)] =
+                    weights[row + static_cast<size_t>(inputSize + h)];
+        }
+        at += static_cast<size_t>(gates) * static_cast<size_t>(stride);
 
-        std::vector<float> gateBias(static_cast<size_t>(4 * hidden));
+        lstm->setWVals(W);
+        lstm->setUVals(U);
+
+        std::vector<float> gateBias(static_cast<size_t>(gates));
         for (auto& b : gateBias) b = weights[at++];
         lstm->setBVals(gateBias);
+
+        /*  The trained initial state is stepped over rather than applied.
+
+            It is what the network had settled to at the start of the capture,
+            and a plugin does not start at the start of anything — it starts
+            wherever the singer dropped in. RTNeural begins from zero, which
+            after a handful of samples is where a stable recurrent layer ends up
+            regardless. What matters is that these values are consumed here:
+            leaving them in the stream shifts the head onto them, which is not
+            an approximation but a different model.
+        */
+        at += static_cast<size_t>(2 * hidden);
 
         std::vector<std::vector<float>> headWeights(1, std::vector<float>(static_cast<size_t>(hidden)));
         for (int h = 0; h < hidden; ++h) headWeights[0][static_cast<size_t>(h)] = weights[at++];

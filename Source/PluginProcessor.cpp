@@ -407,6 +407,14 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     autoGain.prepare(sampleRate);
     voiceProfile.prepare(sampleRate);
     voiceProfile.restoreProfile(publishedProfile.read());
+
+    // Picked up again from the start rather than resumed: the partial average
+    // was discarded with the old rate, and eight seconds of listening is a
+    // better answer than a button that quietly did nothing.
+    if (captureInterrupted) {
+        voiceProfile.startCapture(8.0f);
+        captureInterrupted = false;
+    }
     pitchEngine.prepare(sampleRate, samplesPerBlock, getTotalNumOutputChannels());
     spectralEngine.prepare(sampleRate, samplesPerBlock, getTotalNumOutputChannels());
     smartEQ.prepare(sampleRate, getTotalNumOutputChannels());
@@ -489,6 +497,17 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 void VoxeraAudioProcessor::releaseResources()
 {
     autoGain.reset();
+
+    /*  A listen in progress survives the host restarting us.
+
+        Toggling LOW LATENCY changes the reported latency, and a host that is
+        told its latency changed will often stop and restart the plugin. That
+        landed here, where the reset silently threw away whatever Auto Mix had
+        heard so far — and because Auto Mix only acts when the capture
+        completes, the button appeared to do nothing at all. Nothing reported a
+        problem, because from the code's point of view nothing went wrong.
+    */
+    captureInterrupted = voiceProfile.isCapturing();
     voiceProfile.reset();
     pitchEngine.reset();
     spectralEngine.reset();
@@ -681,7 +700,8 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
         rather than to a frequency picked in advance. The detector runs in
         tracking mode too, so this keeps working with the shifter bypassed.
     */
-    vocalLock.observePitch(pitchEngine.getDetectedHz(), pitchEngine.getConfidence());
+    vocalLock.observePitch(pitchEngine.getDetectedHz(), pitchEngine.getConfidence(),
+                           buffer.getNumSamples());
     vocalLock.setAmount(prm.vocalLock->load() * 0.01f);
     vocalLock.process(buffer);
 

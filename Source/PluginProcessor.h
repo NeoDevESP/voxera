@@ -235,6 +235,7 @@ private:
     std::atomic<int> activeLatencySamples { 0 };
     std::atomic<bool> latencyChangePending { false };
     bool shifterBypassed = false;
+    bool captureInterrupted = false;
     int selectedEngine = 1;
 
     /*  Translates the menu into the engine the pitch stage understands.

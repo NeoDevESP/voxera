@@ -40,10 +40,6 @@ public:
         highPass.prepare(sr, numChannels);
         mudCut.prepare(sr, numChannels);
 
-        // Per-block updates, so the coefficients are in samples of block time.
-        medianCoeff = blockCoefficient(medianSeconds);
-        floorCoeff = blockCoefficient(floorSeconds);
-
         amount.reset(sr, 0.050);
         amount.setCurrentAndTargetValue(0.0f);
         reset();
@@ -63,13 +59,20 @@ public:
 
     /*  Fed once per block from the pitch engine's detector, which keeps running
         even in tracking mode, so this works there too.
+
+        The block length comes in with the reading because that is what says how
+        much time this observation covers. Without it the stage has to guess,
+        and the guess is wrong by up to thirty times.
     */
-    void observePitch(float hz, float confidence) noexcept
+    void observePitch(float hz, float confidence, int blockSamples) noexcept
     {
         if (hz < lowestHz || hz > highestHz || confidence < confidenceFloor) return;
 
         const float note = std::log2(hz);
         if (!voicedSeen) { medianLog2 = floorLog2 = note; voicedSeen = true; return; }
+
+        const float medianCoeff = blockCoefficient(medianSeconds, blockSamples);
+        const float floorCoeff = blockCoefficient(floorSeconds, blockSamples);
 
         medianLog2 += medianCoeff * (note - medianLog2);
 
@@ -112,11 +115,21 @@ public:
     }
 
 private:
-    float blockCoefficient(double seconds) const
+    /*  Built from how much time a block actually covers, not from a guess.
+
+        This used to assume a hundred blocks a second and wave the difference
+        away as being of the same order. It is not: the same host at 48 kHz
+        hands over 64 samples or 2048 depending on how it was configured, which
+        is 750 readings a second against 23 — a factor of thirty. The stage
+        adapted over a phrase in one session and over a verse in another, from
+        the same take, with no setting changed. What made it hard to notice is
+        that both behaviours are plausible on their own; only comparing them
+        shows one of them is wrong.
+    */
+    float blockCoefficient(double seconds, int blockSamples) const
     {
-        // Assumes a block rate around 100 Hz; the estimate is slow enough that
-        // the exact figure does not matter, only its order.
-        return 1.0f - std::exp(-1.0f / static_cast<float>(seconds * 100.0));
+        const double elapsed = static_cast<double>(juce::jmax(1, blockSamples)) / sr;
+        return 1.0f - static_cast<float>(std::exp(-elapsed / juce::jmax(1.0e-6, seconds)));
     }
 
     void applyCoefficients()
@@ -146,7 +159,6 @@ private:
 
     double sr = 48000.0;
     float medianLog2 = 0.0f, floorLog2 = 0.0f;
-    float medianCoeff = 0.0f, floorCoeff = 0.0f;
     int numChannels = 2;
     bool voicedSeen = false;
 };

@@ -444,7 +444,37 @@ void checkOptical()
     CHECK(on.getReductionDb() > 1.0f);
     std::cout << "Optical: reduction " << off.getReductionDb() << " dB at zero, "
               << on.getReductionDb() << " dB at full\n";
-    std::cout << "PASS: optical stage engages with the control and stays finite\n";
+
+    /*  Sample-exact identity with the control down.
+
+        This is the assertion that was missing, and its absence is instructive:
+        the line above already printed the reduction at zero, so the stage had
+        been reporting several decibels of gain change with the control off for
+        as long as the test existed, in plain sight, with nothing checking it.
+        A number printed and not asserted on is not a test.
+
+        Loud material is what exposes it. The stage compressed anything above
+        its threshold whatever the control said, so a quiet probe would have
+        passed while an ordinary vocal did not.
+    */
+    juce::AudioBuffer<float> loud(2, length), untouched(2, length);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < length; ++i) loud.setSample(ch, i, sine(300.0, i, sr, 0.95f));
+    untouched.makeCopyOf(loud);
+
+    voxera::Optical bypassed; bypassed.prepare(sr, 2); bypassed.setAmount(0.0f);
+    bypassed.process(loud);
+
+    float widest = 0.0f;
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < length; ++i)
+            widest = juce::jmax(widest, std::abs(loud.getSample(ch, i)
+                                               - untouched.getSample(ch, i)));
+    std::cout << "  worst deviation at zero on a hot signal: " << widest << "\n";
+    CHECK(widest == 0.0f);
+    CHECK(bypassed.getReductionDb() == 0.0f);
+
+    std::cout << "PASS: optical stage engages with the control, is exact at zero, stays finite\n";
 }
 
 void checkCharacter()
@@ -834,22 +864,53 @@ void checkVocalLock()
 {
     constexpr double sr = 48000.0;
 
-    // Settle the tracker on a singer whose voice sits around `hz`, singing a
-    // melody of +/- 5 semitones around it.
-    const auto settleOn = [&](float hz) {
+    /*  Settle the tracker on a singer around `hz` singing a melody of +/- 5
+        semitones, for a fixed stretch of WALL-CLOCK time at a given DAW block
+        size.
+
+        Counting blocks instead — which is what this did — cannot see the bug
+        it most needs to catch. The stage adapts once per block, so a test that
+        always feeds four thousand blocks feeds a different amount of musical
+        time at every buffer setting, and then agrees with whatever the stage
+        does. Fixing the seconds and varying the blocks is what makes the two
+        runs comparable.
+    */
+    const auto settleOn = [&](float hz, int blockSamples, double seconds = 40.0) {
         auto lock = std::make_unique<voxera::VocalLock>();
         lock->prepare(sr, 2);
         lock->setAmount(1.0f);
-        for (int block = 0; block < 4000; ++block) {
-            const float semitone = 5.0f * std::sin(block * 0.03f);
-            lock->observePitch(hz * std::pow(2.0f, semitone / 12.0f), 0.9f);
+        const int blocks = static_cast<int>(seconds * sr / blockSamples);
+        for (int block = 0; block < blocks; ++block) {
+            const double elapsed = block * blockSamples / sr;
+            const float semitone = 5.0f * std::sin(static_cast<float>(elapsed * 1.4));
+            lock->observePitch(hz * std::pow(2.0f, semitone / 12.0f), 0.9f, blockSamples);
         }
         return lock;
     };
 
+    /*  The same singer, the same forty seconds, three buffer settings a host
+        might plausibly be using.
+
+        This is the failure the old test could not express: the melody and the
+        voice are identical and only the DAW's buffer differs, so any spread
+        here is the plugin changing its behaviour behind the user's back.
+    */
+    {
+        float smallest = 0.0f, largest = 0.0f;
+        for (int blockSamples : {64, 512, 2048}) {
+            const auto tracked = settleOn(220.0f, blockSamples);
+            const float mud = tracked->mudHz();
+            std::cout << "VocalLock at block " << blockSamples << ": mud cut " << mud << " Hz\n";
+            if (smallest == 0.0f || mud < smallest) smallest = mud;
+            if (mud > largest) largest = mud;
+        }
+        std::cout << "  spread across buffer sizes: " << (largest / smallest) << "x\n";
+        CHECK(largest < smallest * 1.05f);
+    }
+
     // A bass around 100 Hz and a soprano around 400 Hz.
-    const auto bass = settleOn(100.0f);
-    const auto soprano = settleOn(400.0f);
+    const auto bass = settleOn(100.0f, 512);
+    const auto soprano = settleOn(400.0f, 512);
 
     std::cout << "VocalLock bass    (100 Hz): HPF " << bass->highPassHz()
               << " Hz, mud cut " << bass->mudHz() << " Hz\n";
@@ -873,8 +934,8 @@ void checkVocalLock()
     // Unvoiced material must not drag the estimate down: consonants and breaths
     // report no fundamental, and averaging those in would sink both filters.
     const auto before = soprano->mudHz();
-    for (int i = 0; i < 4000; ++i) soprano->observePitch(0.0f, 0.0f);
-    for (int i = 0; i < 400; ++i) soprano->observePitch(30.0f, 0.95f);   // below range
+    for (int i = 0; i < 4000; ++i) soprano->observePitch(0.0f, 0.0f, 512);
+    for (int i = 0; i < 400; ++i) soprano->observePitch(30.0f, 0.95f, 512);   // below range
     CHECK(std::abs(soprano->mudHz() - before) < 1.0f);
 
     // Identity at zero, whatever the tracker has decided.
@@ -882,7 +943,7 @@ void checkVocalLock()
     juce::AudioBuffer<float> dry(2, length), through(2, length);
     for (int ch = 0; ch < 2; ++ch)
         for (int i = 0; i < length; ++i) dry.setSample(ch, i, sine(220.0, i, sr, 0.3f));
-    auto quiet = settleOn(220.0f);
+    auto quiet = settleOn(220.0f, 512);
     quiet->setAmount(0.0f);
     through.makeCopyOf(dry);
     quiet->process(through); through.makeCopyOf(dry); quiet->process(through);
