@@ -852,6 +852,80 @@ int main(int argc, char** argv)
                   << "% of the chain's cost at " << rate << " Hz\n";
     }
 
+    /*  What a real capture actually costs, measured rather than assumed.
+
+        Reported and never asserted on, and deliberately so: this reads whatever
+        the person running it has put in their models folder, so there is no
+        figure that would be correct to fail against and no reason for the suite
+        to depend on files it did not create. It prints nothing at all when the
+        folder is empty.
+
+        The point of measuring is that the decision to accept WaveNet at all was
+        made on a CPU budget, and a budget nobody checks afterwards is a guess
+        that has been written down.
+    */
+    {
+        const auto models = VoxeraAudioProcessor::availableNeuralModels();
+        if (models.isEmpty()) {
+            std::cout << "NEURAL cost: no captures in "
+                      << VoxeraAudioProcessor::neuralModelFolder().getFullPathName()
+                      << ", skipping\n";
+        } else {
+            constexpr double rate = 48000.0;
+            constexpr int block = 128;
+
+            /*  Several of them rather than the first.
+
+                The widths differ by a factor of two in channel count and the
+                cost follows, so a single figure would describe whichever file
+                happened to sort first and would be read as describing all of
+                them.
+            */
+            for (int index = 0; index < juce::jmin(4, models.size()); ++index)
+            {
+            VoxeraAudioProcessor p;
+            for (const auto* id : { "pitchOn", "spectralOn", "spatialOn", "gateOn", "limiterOn" })
+                set(p, id, 1.0f);
+            set(p, "neuralMix", 100.0f);
+
+            const auto file = models[index];
+            const auto loaded = p.loadNeuralModel(file);
+            std::cout << "NEURAL cost: " << file.getFileName() << "\n";
+
+            if (loaded.ok) {
+                p.prepareToPlay(rate, block);
+                juce::AudioBuffer<float> b(2, block);
+                juce::MidiBuffer none;
+                int phase = 0;
+                const auto fill = [&] {
+                    for (int ch = 0; ch < 2; ++ch)
+                        for (int i = 0; i < block; ++i)
+                            b.setSample(ch, i, 0.25f * std::sin(juce::MathConstants<float>::twoPi
+                                * 220.0f * static_cast<float>(phase + i) / static_cast<float>(rate)));
+                    phase += block;
+                };
+
+                fill(); p.processBlock(b, none);   // settle outside the timing
+
+                const int blocks = static_cast<int>(rate * 10.0 / block);
+                const auto started = std::chrono::steady_clock::now();
+                for (int n = 0; n < blocks; ++n) { fill(); p.processBlock(b, none); }
+                const double elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - started).count();
+
+                const double realtime = (blocks * block / rate) / elapsed;
+                std::cout << "     whole chain with the capture running: "
+                          << (100.0 / realtime) << "% of one core, about "
+                          << static_cast<int>(realtime) << " instances\n";
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < block; ++i) CHECK(std::isfinite(b.getSample(ch, i)));
+            } else {
+                std::cout << "     refused: " << loaded.message << "\n";
+            }
+            }
+        }
+    }
+
     VoxeraAudioProcessor p;
     set(p, "delayFeedback", 100); CHECK(p.getTailLengthSeconds() > 85.0);
     set(p, "delayFeedback", 0); CHECK(p.getTailLengthSeconds() >= 7.8);
