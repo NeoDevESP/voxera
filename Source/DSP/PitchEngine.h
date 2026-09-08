@@ -5,6 +5,7 @@
 #include "PitchQuantizer.h"
 #include "PitchIntelligence.h"
 #include "PitchSmoother.h"
+#include "PsolaShifter.h"
 #include <vector>
 #include <memory>
 #include <array>
@@ -33,6 +34,22 @@ public:
         natural = 0,
         modern,
         hard
+    };
+
+    /*  Which resynthesis method puts the corrected pitch back into the signal.
+
+        Rubber Band is the general one and the safer default: it will shift
+        anything, including a stereo take with room on it. PSOLA only works on a
+        signal that has one clear period, which is to say one voice — but that
+        is what this plugin is for, and in exchange it costs about a third of
+        the latency and a fraction of the arithmetic, and it never has to
+        reassign a phase, so the vowel comes out with its own texture rather
+        than a reconstructed one.
+    */
+    enum class Engine
+    {
+        rubberBand = 0,
+        psola
     };
 
     void prepare(double sampleRate, int maximumBlockSize, int channels)
@@ -100,6 +117,14 @@ public:
         adapterDelay = rbBlockSize - 1;
         intelligence.prepare(sr / static_cast<double>(rbBlockSize));
 
+        /*  Prepared whichever engine is selected, and the decision cadence is
+            shared. The pitch intelligence and the retune smoother are both
+            tuned in units of one decision per Rubber Band block, so PSOLA
+            deciding at the same rate keeps that tuning meaningful instead of
+            silently changing every time constant with the engine.
+        */
+        psola.prepare(sr, numChannels);
+
         pitchSmoother.reset();
 
         lastDetectedHz.store(0.0f);
@@ -134,6 +159,8 @@ public:
 
         fifoRead = fifoWrite = fifoCount = 0;
         inFill = 0;
+        decisionFill = 0;
+        psola.reset();
         pitchSmoother.reset();
     }
 
@@ -145,6 +172,8 @@ public:
     void setRetune(float value01) noexcept { retune = juce::jlimit(0.0f, 1.0f, value01); }
     void setHumanize(float value01) noexcept { humanize = juce::jlimit(0.0f, 1.0f, value01); }
     void setFormantSemitones(float semitones) noexcept { formantSemitones = juce::jlimit(-12.0f, 12.0f, semitones); }
+    void setEngine(int index) noexcept { engine = static_cast<Engine>(juce::jlimit(0, 1, index)); }
+    Engine getEngine() const noexcept { return engine; }
 
     /*  Takes the shifter out of the signal path for tracking.
 
@@ -159,7 +188,9 @@ public:
 
     int getLatencySamples() const noexcept
     {
-        return shifterBypassed ? 0 : adapterDelay + rbStartDelay;
+        if (shifterBypassed) return 0;
+        return engine == Engine::psola ? psola.getLatencySamples()
+                                       : adapterDelay + rbStartDelay;
     }
 
     int getRubberBandBlockSize() const noexcept { return rbBlockSize; }
@@ -194,6 +225,12 @@ public:
             lastTargetHz.store(0.0f);
             lastConfidence.store(detector.isVoiced() ? 1.0f : 0.0f);
             lastShiftSemitones.store(0.0f);
+            return;
+        }
+
+        if (engine == Engine::psola)
+        {
+            processPsola(buffer, channels, l, r);
             return;
         }
 
@@ -233,6 +270,40 @@ public:
     }
 
 private:
+    /*  The PSOLA path, cut into pieces at the decision cadence.
+
+        There is no fixed-block adapter here — grains are laid down as the
+        samples arrive — so the only reason to subdivide the host block at all
+        is to keep the tuning decision landing at the same rate it does on the
+        Rubber Band path. A host handing over 2048 samples at once would
+        otherwise make one decision where the other engine makes eight, and
+        every retune time would silently stretch to match.
+    */
+    void processPsola(juce::AudioBuffer<float>& buffer, int channels, float* l, float* r)
+    {
+        const int count = buffer.getNumSamples();
+        int offset = 0;
+
+        while (offset < count)
+        {
+            const int piece = juce::jmin(count - offset, rbBlockSize - decisionFill);
+
+            for (int i = offset; i < offset + piece; ++i)
+                detector.pushSample(0.5f * (l[i] + (r != nullptr ? r[i] : l[i])));
+
+            decisionFill += piece;
+            if (decisionFill >= rbBlockSize) {
+                updatePitchDecision();
+                decisionFill = 0;
+            }
+
+            juce::AudioBuffer<float> slice(buffer.getArrayOfWritePointers(),
+                                           channels, offset, piece);
+            psola.process(slice);
+            offset += piece;
+        }
+    }
+
     void updatePitchDecision()
     {
         quantizer.setRoot(root);
@@ -345,6 +416,21 @@ private:
             static_cast<double>(rbBlockSize) / sr, timeMs);
         lastShiftSemitones.store(actualShift);
         const double smoothedRatio = std::pow(2.0, actualShift / 12.0);
+
+        if (engine == Engine::psola)
+        {
+            /*  PSOLA needs the raw reading rather than the corrected one: the
+                grains have to be cut where the periods actually are in the
+                recording, not where the tuner would like them to be. The
+                correction is carried entirely by the spacing they are laid
+                down at.
+            */
+            psola.setPitch(rawDetected, voiced ? confidence : 0.0f);
+            psola.setShiftRatio(static_cast<float>(smoothedRatio));
+            psola.setFormantRatio(std::pow(2.0f, formantSemitones / 12.0f));
+            return;
+        }
+
         shifter->setPitchScale(smoothedRatio);
 
         if (!enabled || std::abs(formantSemitones) < 0.01f)
@@ -416,6 +502,9 @@ private:
     PitchIntelligence intelligence;
 
     std::unique_ptr<RubberBand::RubberBandLiveShifter> shifter;
+    voxera::PsolaShifter psola;
+    Engine engine = Engine::rubberBand;
+    int decisionFill = 0;
 
     int rbBlockSize = 0;
     int rbStartDelay = 0;

@@ -1037,7 +1037,281 @@ void checkAutoMix()
     std::cout << "PASS: auto-mix reacts to mud, dullness, sibilance and dynamics, stays in range\n";
 }
 
+/*  PSOLA: does it move the pitch, keep the level, and stay quiet between grains.
+
+    The three ways this method fails are all audible and all measurable. It can
+    fail to shift at all, which the detector catches. It can modulate the level
+    where the windows join, which shows up as a moving RMS on a steady note. And
+    it can click at every cut, which is the one that matters most and the one a
+    frequency reading will not show — a buzz at the grain rate sits under the
+    note without changing it, so it is measured here as energy appearing above
+    where a pure tone has any business putting it.
+*/
+void checkPsola()
+{
+    for (double sr : {44100.0, 48000.0, 96000.0})
+    {
+        const float sourceHz = 180.0f;
+        const int count = static_cast<int>(sr * 1.5);
+
+        for (float semitones : {0.0f, 2.0f, -3.0f, 7.0f})
+        {
+            voxera::PsolaShifter psola;
+            psola.prepare(sr, 1);
+            psola.setPitch(sourceHz, 0.9f);
+            psola.setShiftRatio(std::pow(2.0f, semitones / 12.0f));
+
+            /*  Six harmonics at equal weight rather than a bare sine.
+
+                A pure tone is the one signal this method is entitled to get
+                the level wrong on: preserving the spectral envelope while
+                moving the pitch means the output takes its amplitude from
+                whatever the envelope holds at the new frequency, and a sine's
+                envelope holds nothing anywhere but at the old one. Measuring
+                against it would be measuring formant preservation working and
+                calling it a level fault. A flat harmonic series has the same
+                envelope wherever the note is moved to, so what is left to
+                measure is the overlap-add, which is the thing under test.
+            */
+            juce::AudioBuffer<float> buffer(1, count);
+            for (int i = 0; i < count; ++i) {
+                float value = 0.0f;
+                for (int h = 1; h <= 6; ++h)
+                    value += std::sin(static_cast<float>(
+                        2.0 * 3.141592653589793 * sourceHz * h * i / sr));
+                buffer.setSample(0, i, 0.12f * value);
+            }
+
+            for (int at = 0; at < count; at += 128) {
+                const int piece = std::min(128, count - at);
+                juce::AudioBuffer<float> slice(buffer.getArrayOfWritePointers(), 1, at, piece);
+                psola.process(slice);
+            }
+
+            // Frequency, read from the settled second half so the ramp-up of the
+            // grain train is not included.
+            YinPitchDetector yin; yin.prepare(sr);
+            for (int i = count / 2; i < count; ++i) yin.pushSample(buffer.getSample(0, i));
+            const float expected = sourceHz * std::pow(2.0f, semitones / 12.0f);
+            const float cents = std::abs(1200.0f * std::log2(yin.getFrequencyHz() / expected));
+            std::cout << "PSOLA " << sr << "Hz " << semitones << "st -> "
+                      << yin.getFrequencyHz() << "Hz, error " << cents << " cents\n";
+            // Measured under one cent everywhere. Held near that rather than at
+            // a comfortable margin, because the failure this guards against —
+            // rounding the mark spacing to whole samples — shows up as a few
+            // cents of constant sharpness and nothing else, and a loose bound
+            // would let it back in unnoticed.
+            CHECK(yin.isVoiced() && cents < 3.0f);
+
+            // Level, compared in two halves of the settled region. A window
+            // overlap that does not sum to unity shows up here as drift.
+            auto rms = [&](int from, int to) {
+                double sum = 0.0;
+                for (int i = from; i < to; ++i) sum += static_cast<double>(buffer.getSample(0, i))
+                                                     * buffer.getSample(0, i);
+                return std::sqrt(sum / std::max(1, to - from));
+            };
+            const double firstHalf = rms(count / 2, count * 3 / 4);
+            const double secondHalf = rms(count * 3 / 4, count);
+            const double drift = std::abs(20.0 * std::log10(std::max(1e-9, firstHalf)
+                                                          / std::max(1e-9, secondHalf)));
+            // Six sines at unrelated phases: the powers add, so the RMS is the
+            // amplitude times the root of half the count.
+            const double sourceRms = 0.12 * std::sqrt(6.0 / 2.0);
+            const double offset = 20.0 * std::log10(std::max(1e-9, secondHalf) / sourceRms);
+            std::cout << "  level drift " << drift << " dB, offset " << offset << " dB\n";
+            CHECK(drift < 1.5 && std::abs(offset) < 4.0);
+        }
+
+        /*  Grain clicks. A cut in the wrong place is a step in the waveform, and
+            a step is broadband — so with a pure tone in, everything above the
+            fourth harmonic of the shifted note is either a click or nothing.
+        */
+        voxera::PsolaShifter psola;
+        psola.prepare(sr, 1);
+        psola.setPitch(sourceHz, 0.9f);
+        psola.setShiftRatio(std::pow(2.0f, 4.0f / 12.0f));
+
+        juce::AudioBuffer<float> buffer(1, count);
+        for (int i = 0; i < count; ++i)
+            buffer.setSample(0, i, 0.3f * std::sin(
+                static_cast<float>(2.0 * 3.141592653589793 * sourceHz * i / sr)));
+        for (int at = 0; at < count; at += 128) {
+            const int piece = std::min(128, count - at);
+            juce::AudioBuffer<float> slice(buffer.getArrayOfWritePointers(), 1, at, piece);
+            psola.process(slice);
+        }
+
+        // A one-pole high pass repeated four times, well above any harmonic the
+        // note itself contributes.
+        const double cutoff = sourceHz * std::pow(2.0f, 4.0f / 12.0f) * 6.0;
+        const double coeff = std::exp(-2.0 * 3.141592653589793 * cutoff / sr);
+        double state[4] = {0, 0, 0, 0};
+        double high = 0.0, total = 0.0;
+        for (int i = count / 2; i < count; ++i) {
+            double x = buffer.getSample(0, i);
+            total += x * x;
+            for (auto& s : state) { s = (1.0 - coeff) * x + coeff * s; x -= s; }
+            high += x * x;
+        }
+        const double aboveDb = 10.0 * std::log10(std::max(1e-12, high) / std::max(1e-12, total));
+        std::cout << "  energy above 6x note: " << aboveDb << " dB\n";
+        CHECK(aboveDb < -30.0);
+    }
+    /*  Formant shifting: the note must not move, and the timbre must.
+
+        Both halves matter and they fail differently. A formant control that
+        drags the pitch with it is not a formant control at all — it is a
+        second tuning knob fighting the first. And one that leaves the pitch
+        alone but does nothing to the spectrum is worse than useless, because
+        it sounds like it works: the level barely changes, so the only way to
+        catch it is to measure where the energy sits.
+    */
+    const double sr = 48000.0;
+    const float noteHz = 200.0f;
+    const int count = static_cast<int>(sr * 1.5);
+
+    float centroidLow = 0.0f, centroidHigh = 0.0f;
+    for (int direction : {-1, 0, 1})
+    {
+        voxera::PsolaShifter psola;
+        psola.prepare(sr, 1);
+        psola.setPitch(noteHz, 0.9f);
+        psola.setShiftRatio(1.0f);
+        psola.setFormantRatio(std::pow(2.0f, static_cast<float>(direction) * 5.0f / 12.0f));
+
+        /*  A source with an actual resonance in it — a bump centred on the
+            fourth harmonic — rather than a plain harmonic series.
+
+            A 1/h series is the one shape this test cannot use: scaling its
+            envelope in frequency is the same as changing its gain, so a
+            working formant shift and a broken one produce the same spectrum
+            and the measurement can only ever pass. A bump has somewhere to
+            move to.
+        */
+        juce::AudioBuffer<float> buffer(1, count);
+        for (int i = 0; i < count; ++i) {
+            float value = 0.0f;
+            for (int h = 1; h <= 14; ++h) {
+                const float offset = static_cast<float>(h) - 4.0f;
+                value += std::exp(-offset * offset / 3.0f) * std::sin(static_cast<float>(
+                    2.0 * 3.141592653589793 * noteHz * h * i / sr));
+            }
+            buffer.setSample(0, i, 0.25f * value);
+        }
+        for (int at = 0; at < count; at += 128) {
+            const int piece = std::min(128, count - at);
+            juce::AudioBuffer<float> slice(buffer.getArrayOfWritePointers(), 1, at, piece);
+            psola.process(slice);
+        }
+
+        YinPitchDetector yin; yin.prepare(sr);
+        for (int i = count / 2; i < count; ++i) yin.pushSample(buffer.getSample(0, i));
+        const float cents = std::abs(1200.0f * std::log2(yin.getFrequencyHz() / noteHz));
+
+        /*  The spectral centroid, measured one harmonic at a time by Goertzel.
+
+            Counting zero crossings would be cheaper and would have been wrong:
+            with a fundamental this strong the rate is pinned at twice the note
+            whatever the harmonics above it are doing, so it reports the pitch
+            and calls it brightness.
+        */
+        double weighted = 0.0, total = 0.0;
+        for (int h = 1; h <= 14; ++h) {
+            const double hz = noteHz * h;
+            const double omega = 2.0 * 3.141592653589793 * hz / sr;
+            const double coeff = 2.0 * std::cos(omega);
+            double s1 = 0.0, s2 = 0.0;
+            for (int i = count / 2; i < count; ++i) {
+                const double s = buffer.getSample(0, i) + coeff * s1 - s2;
+                s2 = s1; s1 = s;
+            }
+            const double power = s1 * s1 + s2 * s2 - coeff * s1 * s2;
+            weighted += power * hz;
+            total += power;
+        }
+        const float rate = static_cast<float>(weighted / std::max(1e-12, total));
+
+        std::cout << "PSOLA formant " << (direction * 5) << "st -> pitch "
+                  << yin.getFrequencyHz() << "Hz (" << cents << " cents), brightness "
+                  << rate << "\n";
+        CHECK(yin.isVoiced() && cents < 3.0f);
+
+        if (direction < 0) centroidLow = rate;
+        if (direction > 0) centroidHigh = rate;
+    }
+    CHECK(centroidHigh > centroidLow * 1.3f);
+
+    std::cout << "PASS: PSOLA pitch accuracy, level continuity, grain-join cleanliness,"
+                 " formants move independently of the note\n";
+}
+
+/*  What the two engines cost, through the real pitch engine rather than the
+    shifter on its own.
+
+    Latency is checked the only way worth checking it: by sending an impulse
+    through and finding where it comes out. A reported figure the host trusts
+    and a real figure that differs is worse than either being large, because
+    everything else in the session gets aligned to the wrong one.
+*/
+void checkPitchEngines()
+{
+    for (int which : {0, 1})
+    {
+        const char* name = which == 0 ? "RubberBand" : "PSOLA";
+
+        PitchEngine engine;
+        engine.prepare(48000, 512, 1);
+        engine.setEngine(which);
+        engine.setEnabled(false);
+
+        juce::AudioBuffer<float> impulse(1, 32768);
+        impulse.clear();
+        impulse.setSample(0, 0, 0.5f);
+        for (int at = 0; at < impulse.getNumSamples(); at += 512) {
+            juce::AudioBuffer<float> slice(impulse.getArrayOfWritePointers(), 1, at, 512);
+            engine.process(slice);
+        }
+
+        int peak = 0;
+        for (int i = 1; i < impulse.getNumSamples(); ++i)
+            if (std::abs(impulse.getSample(0, i)) > std::abs(impulse.getSample(0, peak))) peak = i;
+
+        const int reported = engine.getLatencySamples();
+        std::cout << name << " latency reported " << reported << " samples ("
+                  << (1000.0 * reported / 48000.0) << " ms), impulse at " << peak << "\n";
+        CHECK(std::abs(peak - reported) <= 2);
+
+        // Cost, on a signal that keeps the engine doing real work throughout.
+        PitchEngine timed;
+        timed.prepare(48000, 512, 1);
+        timed.setEngine(which);
+        timed.setEnabled(true);
+        timed.setAmount(1.0f);
+
+        const int seconds = 10;
+        juce::AudioBuffer<float> tone(1, 48000 * seconds);
+        for (int i = 0; i < tone.getNumSamples(); ++i)
+            tone.setSample(0, i, 0.25f * std::sin(
+                static_cast<float>(2.0 * 3.141592653589793 * 187.0 * i / 48000.0)));
+
+        const auto started = std::chrono::steady_clock::now();
+        for (int at = 0; at + 512 <= tone.getNumSamples(); at += 512) {
+            juce::AudioBuffer<float> slice(tone.getArrayOfWritePointers(), 1, at, 512);
+            timed.process(slice);
+        }
+        const double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+
+        std::cout << "  " << name << " cost " << (100.0 * elapsed / seconds)
+                  << "% of one core (mono, 48 kHz)\n";
+    }
+    std::cout << "PASS: both pitch engines report the latency they actually have\n";
+}
+
 int main() {
+    checkPsola();
+    checkPitchEngines();
     checkSmartEQ();
     checkBypass<AdaptiveSpectralEngine>(); checkBypass<SpatialEngine>();
     checkSpectralPartitioning(); checkSlowDelay();

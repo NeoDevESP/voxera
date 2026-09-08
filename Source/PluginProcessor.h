@@ -163,6 +163,8 @@ private:
         std::atomic<float>* pitchKey {};
         std::atomic<float>* pitchScale {};
         std::atomic<float>* pitchMode {};
+        std::atomic<float>* pitchEngine {};
+
         std::atomic<float>* tuneAmount {};
         std::atomic<float>* retune {};
         std::atomic<float>* humanize {};
@@ -233,6 +235,26 @@ private:
     std::atomic<int> activeLatencySamples { 0 };
     std::atomic<bool> latencyChangePending { false };
     bool shifterBypassed = false;
+    int selectedEngine = 1;
+
+    /*  Translates the menu into the engine the pitch stage understands.
+
+        The two orders are not the same: the menu lists PSOLA first because it
+        is the default, while the engine enumeration keeps Rubber Band at zero
+        because it was there first.
+
+        Worth being plain about what that default means for existing work. A
+        project saved before this parameter existed has no value stored for it,
+        so it opens on PSOLA — a different engine than it was mixed through,
+        and it will not sound identical. That is the deliberate choice for a
+        new version rather than an oversight, and the old sound is one menu
+        entry away; the earlier builds remain installed separately for anyone
+        who needs a mix to recall exactly.
+    */
+    int engineFromParameter() const noexcept
+    {
+        return prm.pitchEngine != nullptr && prm.pitchEngine->load() < 0.5f ? 1 : 0;
+    }
 
     void bindParameters();
     void setParameterNotifying(const char* id, float value);
