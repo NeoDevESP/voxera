@@ -745,7 +745,40 @@ void checkWarmth()
     CHECK(plain.first < plain.second * 0.01f);  // and symmetrically
     CHECK(warm.first > plain.first * 20.0f);    // bias produced even harmonics
     CHECK(warm.first > warm.second * 0.1f);     // at a level that matters
-    std::cout << "PASS: warmth turns a symmetric shaper into one with even harmonics\n";
+
+    /*  Where the colour lands, which is what separates gear from distortion.
+
+        A curve applied flat across the spectrum shapes a low fundamental and a
+        sibilant one equally hard, and the results are mud and harshness. Real
+        circuits colour the bottom far more than the top, so the stage tilts the
+        signal into the curve and untilts it afterwards. Measuring a low tone
+        and a high one through the same settings is what shows that is
+        happening: the low one has to come out with substantially more harmonic
+        content than the high one, or the tilt is not doing its job.
+    */
+    const auto distortionAt = [&](double hz) {
+        juce::dsp::ProcessSpec spec { sr, 512, 2 };
+        Saturator sat; sat.prepare(spec);
+        sat.setDriveDb(18.0f); sat.setMix(1.0f); sat.setWarmth(0.6f);
+        juce::AudioBuffer<float> b(2, length);
+        for (int pass = 0; pass < 2; ++pass) {
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < length; ++i) b.setSample(ch, i, sine(hz, i, sr, 0.5f));
+            sat.process(b);
+        }
+        const float fundamental = toneMagnitude(b, sr, hz);
+        const float second = toneMagnitude(b, sr, 2.0 * hz);
+        const float third = toneMagnitude(b, sr, 3.0 * hz);
+        return (second + third) / juce::jmax(1.0e-9f, fundamental);
+    };
+
+    const float lowColour = distortionAt(150.0);
+    const float highColour = distortionAt(5000.0);
+    std::cout << "Saturator colour: " << (100.0f * lowColour) << "% at 150 Hz, "
+              << (100.0f * highColour) << "% at 5 kHz\n";
+    CHECK(lowColour > highColour * 2.0f);
+
+    std::cout << "PASS: warmth adds even harmonics, and the colour lands low rather than flat\n";
 }
 
 void checkVocalLock()

@@ -1,6 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include "RealtimeUtilities.h"
+#include "Biquad.h"
 #include <array>
 #include <cmath>
 #include <memory>
@@ -29,6 +30,31 @@ public:
         dcCoeff = 1.0f - juce::MathConstants<float>::twoPi * 12.0f / static_cast<float>(spec.sampleRate);
         dcX1.fill(0.0f);
         dcY1.fill(0.0f);
+
+        /*  Emphasis around the shaper, and its exact inverse after it.
+
+            Applying one curve to the whole spectrum is the thing no analogue
+            circuit does, and it is what makes digital saturation sound like
+            distortion rather than like gear. Driven flat, a low fundamental
+            throws its harmonics into the midrange as mud, and sibilance is
+            shaped as hard as everything else and turns harsh.
+
+            Transformers and valves colour the bottom far more than the top. So
+            the low end is lifted into the curve and the top held out of it, and
+            the opposite shelves afterwards put the balance back. Because the
+            two are exact inverses of each other, a signal too quiet to reach
+            the curve passes through completely unchanged — the tilt costs
+            nothing until the stage is actually working.
+        */
+        preLow.prepare(spec.sampleRate, static_cast<int>(spec.numChannels));
+        preHigh.prepare(spec.sampleRate, static_cast<int>(spec.numChannels));
+        postLow.prepare(spec.sampleRate, static_cast<int>(spec.numChannels));
+        postHigh.prepare(spec.sampleRate, static_cast<int>(spec.numChannels));
+
+        preLow.setLowShelf(lowHz, tiltDb);
+        preHigh.setHighShelf(highHz, -tiltDb);
+        postLow.setLowShelf(lowHz, -tiltDb);
+        postHigh.setHighShelf(highHz, tiltDb);
     }
 
     void reset()
@@ -69,6 +95,13 @@ public:
                     dry.getWritePointer(ch)[i] = dryDelay.process(ch, block.getChannelPointer(static_cast<size_t>(ch))[i]);
                 dryDelay.advance();
             }
+            // Into the curve tilted, so the bottom is what gets coloured.
+            for (int i = 0; i < count; ++i)
+                for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+                    auto& value = block.getChannelPointer(static_cast<size_t>(ch))[i];
+                    value = preHigh.processSample(ch, preLow.processSample(ch, value));
+                }
+
             auto up = oversampling->processSamplesUp(block);
             for (size_t i = 0; i < up.getNumSamples(); ++i)
             {
@@ -105,6 +138,14 @@ public:
                     value = y;
                 }
 
+            // And back out through the inverse, restoring the balance while
+            // leaving the harmonics where the tilt put them.
+            for (int i = 0; i < count; ++i)
+                for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+                    auto& value = block.getChannelPointer(static_cast<size_t>(ch))[i];
+                    value = postHigh.processSample(ch, postLow.processSample(ch, value));
+                }
+
             for (int i = 0; i < count; ++i)
             {
                 const float wet = mix.getNextValue();
@@ -123,6 +164,13 @@ private:
     // Beyond this the curve is so lopsided it reads as a fault rather than as
     // warmth, and the DC blocker starts having to work hard.
     static constexpr float maxBias = 0.65f;
+
+    // Nine decibels of tilt: enough that the bottom is clearly what is being
+    // driven, gentle enough that the inverse afterwards does not have to undo
+    // anything the ear would notice.
+    static constexpr double lowHz = 320.0, highHz = 3800.0, tiltDb = 9.0;
+
+    Biquad preLow, preHigh, postLow, postHigh;
 
     juce::SmoothedValue<float> driveDb, warmth, mix;
     std::array<float, 2> dcX1 {}, dcY1 {};

@@ -59,6 +59,7 @@ private:
     juce::TextButton autoMix { "AUTO MIX (8s)" };
     juce::TextButton loadModel { "LOAD NEURAL MODEL" };
     void chooseNeuralModel();
+    void applyNeuralModel(const juce::File&);
     juce::TextButton bypass { "BYPASS" };
     juce::TextButton lowLatency { "LOW LATENCY" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;

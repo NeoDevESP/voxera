@@ -304,39 +304,78 @@ bool VoxeraAudioProcessorEditor::keyPressed(const juce::KeyPress& key)
 }
 #endif
 
-void VoxeraAudioProcessorEditor::chooseNeuralModel()
+void VoxeraAudioProcessorEditor::applyNeuralModel(const juce::File& file)
 {
-    // Clicking with a capture already loaded removes it, so there is a way back
-    // without hunting for a file to replace it with.
-    if (processor.hasNeuralModel()) {
-        processor.unloadNeuralModel();
-        loadModel.setButtonText("LOAD NEURAL MODEL");
+    const auto result = processor.loadNeuralModel(file);
+    if (!result.ok) {
+        juce::NativeMessageBox::showMessageBoxAsync(
+            juce::AlertWindow::WarningIcon, "VOXERA", result.message);
         return;
     }
+    loadModel.setButtonText(processor.neuralModelName().toUpperCase());
+    // Reported on success too: running at a different rate from the session is
+    // worth knowing about even though the stage now handles it.
+    if (result.message.contains("captured at"))
+        juce::NativeMessageBox::showMessageBoxAsync(
+            juce::AlertWindow::InfoIcon, "VOXERA", result.message);
+}
 
-    chooser = std::make_unique<juce::FileChooser>(
-        "Load a neural capture",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
-        "*.nam;*.json");
+/*  A menu of what is in the models folder, rather than a file chooser.
 
-    chooser->launchAsync(juce::FileBrowserComponent::openMode
-                         | juce::FileBrowserComponent::canSelectFiles,
-        [this](const juce::FileChooser& fc) {
-            const auto file = fc.getResult();
-            if (file == juce::File{}) return;
+    Captures are collected once and used for years, so hunting through the
+    filesystem on every session is the wrong shape for the task. Browsing is
+    still there for a file kept somewhere else, and the folder itself can be
+    opened straight from here, which is how anything gets into it.
+*/
+void VoxeraAudioProcessorEditor::chooseNeuralModel()
+{
+    juce::PopupMenu menu;
+    const auto models = VoxeraAudioProcessor::availableNeuralModels();
 
-            const auto result = processor.loadNeuralModel(file);
-            if (!result.ok) {
-                juce::NativeMessageBox::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon, "VOXERA", result.message);
+    if (models.isEmpty()) {
+        menu.addSectionHeader("No captures in your models folder");
+        menu.addItem(-3, "Open the models folder");
+    } else {
+        menu.addSectionHeader("Models folder");
+        for (int i = 0; i < models.size(); ++i)
+            menu.addItem(i + 1, models[i].getFileNameWithoutExtension(), true,
+                         models[i] == processor.neuralModelFile());
+        menu.addSeparator();
+        menu.addItem(-3, "Open the models folder");
+    }
+
+    menu.addItem(-1, "Browse for a file...");
+    if (processor.hasNeuralModel()) {
+        menu.addSeparator();
+        menu.addItem(-2, "Remove the current model");
+    }
+
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(loadModel),
+        [this, models](int choice) {
+            if (choice == 0) return;
+
+            if (choice == -2) {
+                processor.unloadNeuralModel();
+                loadModel.setButtonText("LOAD NEURAL MODEL");
                 return;
             }
-            loadModel.setButtonText(processor.neuralModelName().toUpperCase());
-            // Shown even on success: a mismatched sample rate loads perfectly
-            // well and still does not sound like the capture.
-            if (result.message.contains("trained at"))
-                juce::NativeMessageBox::showMessageBoxAsync(
-                    juce::AlertWindow::InfoIcon, "VOXERA", result.message);
+            if (choice == -3) {
+                VoxeraAudioProcessor::neuralModelFolder().revealToUser();
+                return;
+            }
+            if (choice == -1) {
+                chooser = std::make_unique<juce::FileChooser>(
+                    "Load a neural capture",
+                    VoxeraAudioProcessor::neuralModelFolder(), "*.nam;*.json");
+                chooser->launchAsync(juce::FileBrowserComponent::openMode
+                                     | juce::FileBrowserComponent::canSelectFiles,
+                    [this](const juce::FileChooser& fc) {
+                        if (fc.getResult() != juce::File{}) applyNeuralModel(fc.getResult());
+                    });
+                return;
+            }
+            if (juce::isPositiveAndBelow(choice - 1, models.size()))
+                applyNeuralModel(models[choice - 1]);
         });
 }
 

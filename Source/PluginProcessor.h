@@ -90,6 +90,13 @@ public:
         until that thread has certainly stopped reading it, and suspending is
         the mechanism a plugin already has for saying so.
     */
+    /*  Where captures live, so they are chosen from a list instead of hunted
+        for. Created on first use: a folder that has to be made by hand is a
+        folder nobody uses.
+    */
+    static juce::File neuralModelFolder();
+    static juce::Array<juce::File> availableNeuralModels();
+
     voxera::NeuralStage::LoadResult loadNeuralModel(const juce::File& file);
     void unloadNeuralModel();
     bool hasNeuralModel() const noexcept { return neural.hasModel(); }

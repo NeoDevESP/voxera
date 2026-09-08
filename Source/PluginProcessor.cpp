@@ -169,6 +169,26 @@ void VoxeraAudioProcessor::bindParameters()
     prm.neuralMix = bind(ParamIDs::neuralMix);
 }
 
+juce::File VoxeraAudioProcessor::neuralModelFolder()
+{
+    auto folder = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+                      .getChildFile("VOXERA").getChildFile("Models");
+    folder.createDirectory();
+    return folder;
+}
+
+juce::Array<juce::File> VoxeraAudioProcessor::availableNeuralModels()
+{
+    juce::Array<juce::File> found;
+    neuralModelFolder().findChildFiles(found, juce::File::findFiles, true, "*.nam;*.json");
+    // Alphabetical, so the list does not reshuffle itself between sessions on
+    // whatever order the filesystem happens to return.
+    std::sort(found.begin(), found.end(), [](const juce::File& a, const juce::File& b) {
+        return a.getFileNameWithoutExtension().compareIgnoreCase(b.getFileNameWithoutExtension()) < 0;
+    });
+    return found;
+}
+
 voxera::NeuralStage::LoadResult VoxeraAudioProcessor::loadNeuralModel(const juce::File& file)
 {
     auto result = neural.load(file);
