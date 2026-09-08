@@ -151,9 +151,16 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
         addAndMakeVisible(c.combo); addAndMakeVisible(c.label);
         c.attachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(processor.apvts, choiceIDs[i], c.combo);
     }
-    const char* names[] = {"CLEAN", "WARM", "MODERN", "DREAM", "RADIO"};
-    for (int i = 0; i < 5; ++i) {
-        auto& b = presets[static_cast<size_t>(i)]; b.setButtonText(names[i]);
+    /*  Names taken from the processor rather than repeated here.
+
+        They were written out twice, and a second list is a second thing to
+        forget: adding a preset to the table and not to this array gives a
+        button labelled with somebody else's preset, which is worse than a
+        missing one because it looks right.
+    */
+    for (int i = 0; i < VoxeraAudioProcessor::numFactoryPresets; ++i) {
+        auto& b = presets[static_cast<size_t>(i)];
+        b.setButtonText(processor.getProgramName(i).toUpperCase());
         b.onClick = [this, i] { processor.applyFactoryPreset(i); };
         addAndMakeVisible(b);
     }
@@ -292,7 +299,11 @@ void VoxeraAudioProcessorEditor::resized()
         place(c.label, 115 + i * 157, 350, 120, 22);
         place(c.slider, 115 + i * 157, 388, 120, 103);
     }
-    for (int i = 0; i < 5; ++i) place(presets[static_cast<size_t>(i)], 138 + i * 187, 374, 174, 40);
+    // Ten across the same span the five used to have. The cell is narrower than
+    // the pitch so neighbouring buttons never share an edge, which is the same
+    // reason the meters above are laid out that way.
+    for (int i = 0; i < VoxeraAudioProcessor::numFactoryPresets; ++i)
+        place(presets[static_cast<size_t>(i)], 110 + i * 98, 374, 92, 40);
     place(savePreset, 405, 440, 178, 34); place(loadPreset, 603, 440, 178, 34);
     place(loadModel, 405, 484, 376, 32);
     place(bypass, 63, 644, 104, 54);

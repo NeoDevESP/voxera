@@ -470,11 +470,18 @@ int main(int argc, char** argv)
             return std::make_pair(tone(800.0), tone(400.0));   // second, fundamental
         };
 
-        static const char* names[] { "Clean", "Warm", "Modern", "Dream", "Radio" };
+        /*  Asked of the processor rather than listed again here.
+
+            This was a five-entry array indexed by the preset count, which read
+            off its end the moment a sixth preset existed — a fault that would
+            not have shown up as a wrong name but as whatever happened to follow
+            it in memory.
+        */
+        VoxeraAudioProcessor namer;
         for (int preset = 0; preset < VoxeraAudioProcessor::numFactoryPresets; ++preset) {
             const auto [second, fundamental] = secondHarmonic(preset);
             const double ratio = second / juce::jmax(1.0e-9, fundamental);
-            std::cout << "ANALOGUE " << names[preset] << ": 2nd harmonic "
+            std::cout << "ANALOGUE " << namer.getProgramName(preset) << ": 2nd harmonic "
                       << (100.0 * ratio) << "% of the fundamental\n";
             CHECK(std::isfinite(second) && fundamental > 1.0e-4);
             // A tenth of a percent is far below audibility; the point of the
@@ -482,6 +489,72 @@ int main(int argc, char** argv)
             // would give.
             CHECK(ratio > 0.001);
         }
+    }
+
+    /*  Every preset reaches every control it claims to, and no two are the same.
+
+        The failure this exists for has happened repeatedly here: a control gets
+        added, the preset table is not widened, and the stage then never runs
+        from a preset however good it sounds when found by hand. Nothing reports
+        it — the preset still loads, the plugin still works, and the control
+        simply sits at its default forever.
+
+        So: read the parameters back after each preset, require that every
+        column actually varies somewhere across the set, and require that the
+        presets are distinguishable from each other. A column that never moves
+        is either dead or pointless, and both are worth failing over.
+    */
+    {
+        static constexpr const char* watched[] = {
+            "tuneAmount", "retune", "humanize", "toneMacro", "airDb",
+            "space", "satDrive", "satMix", "punch", "exciter",
+            "optical", "density", "clipAmount", "smartEQAmount", "vocalLock",
+            "satWarmth", "compType", "pitchMode", "formant", "doubler",
+            "width", "delayMix", "reverbBody", "presenceDb", "deEss"
+        };
+        constexpr int watchedCount = static_cast<int>(std::size(watched));
+
+        VoxeraAudioProcessor p;
+        std::vector<std::vector<float>> seen;
+
+        for (int preset = 0; preset < VoxeraAudioProcessor::numFactoryPresets; ++preset) {
+            p.applyFactoryPreset(preset);
+            std::vector<float> row;
+            for (const auto* id : watched) {
+                auto* parameter = p.apvts.getParameter(id);
+                CHECK(parameter);
+                row.push_back(parameter->convertFrom0to1(parameter->getValue()));
+            }
+            seen.push_back(row);
+        }
+
+        // No column may sit still across the whole set.
+        for (int column = 0; column < watchedCount; ++column) {
+            float lowest = seen[0][static_cast<size_t>(column)];
+            float highest = lowest;
+            for (const auto& row : seen) {
+                lowest = juce::jmin(lowest, row[static_cast<size_t>(column)]);
+                highest = juce::jmax(highest, row[static_cast<size_t>(column)]);
+            }
+            if (highest - lowest < 1.0e-4f)
+                std::cout << "PRESET column never varies: " << watched[column] << "\n";
+            CHECK(highest - lowest > 1.0e-4f);
+        }
+
+        // And no two presets may land on the same settings.
+        for (size_t a = 0; a + 1 < seen.size(); ++a)
+            for (size_t b = a + 1; b < seen.size(); ++b)
+                CHECK(seen[a] != seen[b]);
+
+        // The style presets are built around the tuner gripping hard; if that
+        // stopped reaching them they would be indistinguishable from the rest.
+        VoxeraAudioProcessor namer2;
+        int hardTuned = 0;
+        for (size_t i = 0; i < seen.size(); ++i)
+            if (seen[i][17] > 1.5f) ++hardTuned;   // pitchMode: 2 is Hard
+        std::cout << "PRESETS: " << VoxeraAudioProcessor::numFactoryPresets
+                  << " total, " << hardTuned << " hard-tuned, all distinct\n";
+        CHECK(hardTuned >= 3);
     }
 
     /*  Voice Match, end to end.

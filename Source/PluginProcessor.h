@@ -31,7 +31,17 @@ class VoxeraAudioProcessor : public juce::AudioProcessor,
                              private juce::AsyncUpdater
 {
 public:
-    static constexpr int numFactoryPresets = 5;
+    /*  Five general starting points, then five that chase a particular
+        production sound rather than a general quality.
+
+        The second group is named for what it does, not for who is known for
+        it. The processing itself is nobody's property — an EQ curve, a retune
+        speed and a reverb size are technique, and technique has always been
+        shared — but a real person's name on a preset in something you sell
+        says they endorsed it, which is a different claim entirely and not
+        one that is ours to make.
+    */
+    static constexpr int numFactoryPresets = 10;
     // Bumped whenever parameters are added, so an older saved state is known to
     // need the missing-parameter pass in setStateInformation.
     // 4: density, vocal lock, warmth, reverb tone, chop, crush, modulation and

@@ -54,7 +54,7 @@ private:
     // Six: the three pitch selectors on VOCALS, and three more on CHOP.
     std::array<Choice, 6> choices;
     std::array<juce::TextButton, 6> tabs;
-    std::array<juce::TextButton, 5> presets;
+    std::array<juce::TextButton, VoxeraAudioProcessor::numFactoryPresets> presets;
     juce::TextButton analyze { "ANALYZE VOICE" }, savePreset { "SAVE PRESET" }, loadPreset { "LOAD PRESET" };
     juce::TextButton autoMix { "AUTO MIX (8s)" };
     juce::TextButton loadModel { "LOAD NEURAL MODEL" };
