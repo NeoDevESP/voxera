@@ -38,7 +38,7 @@ public:
     {
         sr = (std::isfinite(sampleRate) && sampleRate > 0.0) ? sampleRate : 48000.0;
         numChannels = juce::jlimit(1, 2, channels);
-        detectorCoeff = coefficient(0.002);
+        updateSidechain();
         reset();
     }
 
@@ -48,6 +48,7 @@ public:
         reduction = 0.0f;
         holdDepth = 0.0f;
         feedbackState.fill(0.0f);
+        sidechainLow.fill(0.0f);
         reductionDb.store(0.0f, std::memory_order_relaxed);
     }
 
@@ -56,6 +57,39 @@ public:
     void setRatio(float r) noexcept { ratio = juce::jmax(1.0f, r); }
     void setAttackMs(float ms) noexcept { attackMs = juce::jmax(0.02f, ms); }
     void setReleaseMs(float ms) noexcept { releaseMs = juce::jmax(5.0f, ms); }
+
+    /*  What the detector is not allowed to hear.
+
+        The single most useful control on a vocal compressor, and the one this
+        did not have. A voice carries most of its energy low down — the
+        fundamental, proximity from a close microphone, and the blast of every
+        plosive — while almost nothing anyone is trying to control lives there.
+        A detector listening flat is therefore driven mostly by the part of the
+        signal the compression is not for, so the whole vocal ducks on every "p"
+        and breathes with the fundamental instead of with the performance.
+
+        Hardware has had this since the 1176's sidechain switch, and it is a
+        large part of why those units are described as smooth on voice. The
+        smoothness is not in the gain element; it is in what the detector was
+        spared.
+    */
+    void setSidechainHz(float hz) noexcept
+    {
+        sidechainHz = juce::jlimit(20.0f, 400.0f, std::isfinite(hz) ? hz : 85.0f);
+        updateSidechain();
+    }
+
+    /*  How much of the compressed signal reaches the output.
+
+        Below one this is parallel compression, and it is the reason people
+        drive these things far harder than the level alone would justify: the
+        quiet detail comes up, the loud parts keep the transient the dry signal
+        still has, and the distortion of a gain element working hard arrives as
+        colour underneath rather than as the whole sound. Squashing flat and
+        blending it under is a different result from compressing gently, even
+        where both land on the same amount of gain reduction.
+    */
+    void setMix(float normalised) noexcept { mix = juce::jlimit(0.0f, 1.0f, normalised); }
 
     float getReductionDb() const noexcept { return reductionDb.load(std::memory_order_relaxed); }
 
@@ -80,13 +114,31 @@ public:
                 the loop converges on a reduction instead of being handed one.
                 One sample of delay is what the analogue circuit has too.
             */
-            float key = 0.0f;
+            float keySignal = 0.0f;
             for (int ch = 0; ch < channels; ++ch)
-                key = juce::jmax(key, std::abs(voice.feedback
-                                               ? feedbackState[static_cast<size_t>(ch)]
-                                               : buffer.getReadPointer(ch)[i]));
+                keySignal += voice.feedback ? feedbackState[static_cast<size_t>(ch)]
+                                            : buffer.getReadPointer(ch)[i];
+            keySignal /= static_cast<float>(channels);
 
-            detector += detectorCoeff * (key - detector);
+            /*  Filtered before it is rectified, which is the only order that
+                does anything. Rectifying first turns a low rumble into a slow
+                positive bulge, and no amount of high-passing after that removes
+                the level it already contributed — the filter has to sit where
+                the circuit's does, ahead of the detector.
+
+                Two poles rather than one: a 6 dB slope leaves too much of a
+                plosive in the key signal to stop the ducking it causes.
+            */
+            sidechainLow[0] += sidechainCoeff * (keySignal - sidechainLow[0]);
+            const float onceFiltered = keySignal - sidechainLow[0];
+            sidechainLow[1] += sidechainCoeff * (onceFiltered - sidechainLow[1]);
+            const float key = std::abs(onceFiltered - sidechainLow[1]);
+
+            // Each element averages over its own window. A FET follows peaks; a
+            // valve stage is much closer to reading the average, and giving both
+            // the same detector was quietly removing half of what separates them.
+            const float detectorSpeed = coefficient(0.002 * voice.detectorScale);
+            detector += detectorSpeed * (key - detector);
             const float levelDb = juce::Decibels::gainToDecibels(detector, -96.0f);
             const float over = levelDb - thresholdDb;
 
@@ -126,6 +178,7 @@ public:
             for (int ch = 0; ch < channels; ++ch)
             {
                 auto& sample = buffer.getWritePointer(ch)[i];
+                const float dry = sample;
                 float y = sample * gain;
 
                 /*  The gain element distorting in proportion to its own work.
@@ -143,8 +196,18 @@ public:
                     y += amount * (bent + even - y);
                 }
 
+                /*  The loop keeps listening to the fully compressed signal, not
+                    to the blend. A feedback detector fed its own diluted output
+                    would measure a level that was never compressed that hard
+                    and ease off accordingly, so turning the blend down would
+                    quietly reduce the compression as well as its share of the
+                    output — two controls in one knob, and neither doing what it
+                    says.
+                */
                 feedbackState[static_cast<size_t>(ch)] = y;
-                sample = std::isfinite(y) ? y : 0.0f;
+
+                const float blended = dry + mix * (y - dry);
+                sample = std::isfinite(blended) ? blended : 0.0f;
             }
 
             deepest = juce::jmax(deepest, reduction);
@@ -159,6 +222,8 @@ private:
         bool feedback;
         float attackScale, releaseScale, slowFactor, programDependence;
         float kneeDb, ratioBend, drive, evenness, makeupPerDb;
+        // How long the detector averages over, relative to two milliseconds.
+        float detectorScale;
     };
 
     const Voice& character() const
@@ -167,11 +232,11 @@ private:
             arithmetic one rather than by trying to be a circuit model.
         */
         static const std::array<Voice, numTypes> voices { {
-            // feedback attack release  slow  prog  knee  bend  drive  even  makeup
-            {  false,    1.0f,   1.0f,  1.0f, 0.0f, 2.0f, 0.00f, 0.00f, 0.0f, 0.00f },  // Clean: the textbook
-            {  true,     0.08f,  0.5f,  6.0f, 0.8f, 1.0f, 0.25f, 0.35f, 0.2f, 0.25f },  // FET: fast, hard, gritty
-            {  false,    1.0f,   1.0f,  4.0f, 0.6f, 3.0f, 0.05f, 0.10f, 0.3f, 0.15f },  // VCA: controlled, auto-release
-            {  true,     2.5f,   2.0f,  8.0f, 1.0f, 6.0f, 0.40f, 0.30f, 0.8f, 0.35f }   // Vari-Mu: slow, valve, even
+            // feedback attack release  slow  prog  knee  bend  drive  even  makeup  detect
+            {  false,    1.0f,   1.0f,  1.0f, 0.0f, 2.0f, 0.00f, 0.00f, 0.0f, 0.00f,  1.0f },  // Clean: the textbook
+            {  true,     0.08f,  0.5f,  6.0f, 0.8f, 1.0f, 0.25f, 0.35f, 0.2f, 0.25f,  0.3f },  // FET: fast, hard, gritty
+            {  false,    1.0f,   1.0f,  4.0f, 0.6f, 3.0f, 0.05f, 0.10f, 0.3f, 0.15f,  1.5f },  // VCA: controlled, auto-release
+            {  true,     2.5f,   2.0f,  8.0f, 1.0f, 6.0f, 0.40f, 0.30f, 0.8f, 0.35f,  6.0f }   // Vari-Mu: slow, valve, even
         } };
         return voices[static_cast<size_t>(type)];
     }
@@ -181,12 +246,20 @@ private:
         return 1.0f - std::exp(-1.0f / static_cast<float>(sr * juce::jmax(1.0e-5, seconds)));
     }
 
+    void updateSidechain() noexcept
+    {
+        sidechainCoeff = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi
+                                         * sidechainHz / static_cast<float>(sr));
+    }
+
     std::atomic<float> reductionDb { 0.0f };
     std::array<float, 2> feedbackState {};
+    std::array<float, 2> sidechainLow {};   // the two poles of the detector filter
 
     double sr = 48000.0;
-    float detector = 0.0f, reduction = 0.0f, holdDepth = 0.0f, detectorCoeff = 1.0f;
+    float detector = 0.0f, reduction = 0.0f, holdDepth = 0.0f;
     float thresholdDb = -18.0f, ratio = 3.0f, attackMs = 8.0f, releaseMs = 90.0f;
+    float sidechainHz = 85.0f, sidechainCoeff = 0.0f, mix = 1.0f;
     int numChannels = 2, type = clean;
 };
 }

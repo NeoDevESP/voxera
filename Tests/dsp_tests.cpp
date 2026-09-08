@@ -1026,7 +1026,80 @@ void checkColourCompressor()
     CHECK(tube.reduction < pure.reduction);
     CHECK(vca.reduction > 0.5f);
 
-    std::cout << "PASS: compressor characters differ in colour and in how the loop settles\n";
+    /*  The sidechain filter has to actually deafen the detector.
+
+        Measured the way the problem presents itself on a voice: a loud low
+        tone standing in for proximity and plosive energy, with a quiet
+        vocal-range tone riding on it. Flat, the compressor spends its whole
+        range reacting to the low end and the vocal ducks along with it. The
+        test is that raising the filter takes that away.
+    */
+    {
+        constexpr double sr = 48000.0;
+        constexpr int length = 48000;
+
+        const auto reductionWith = [&](float sidechainHz) {
+            voxera::ColourCompressor comp;
+            comp.prepare(sr, 1);
+            comp.setType(voxera::ColourCompressor::vca);
+            comp.setThresholdDb(-24.0f);
+            comp.setRatio(6.0f);
+            comp.setSidechainHz(sidechainHz);
+
+            juce::AudioBuffer<float> buffer(1, length);
+            for (int i = 0; i < length; ++i)
+                buffer.setSample(0, i, 0.7f * sine(45.0, i, sr, 1.0f)
+                                     + 0.05f * sine(900.0, i, sr, 1.0f));
+            comp.process(buffer);
+            return comp.getReductionDb();
+        };
+
+        const float flat = reductionWith(20.0f);
+        const float filtered = reductionWith(400.0f);
+        std::cout << "Comp sidechain: " << flat << " dB reduction flat, "
+                  << filtered << " dB with the detector high-passed\n";
+        CHECK(flat > filtered + 6.0f);
+    }
+
+    /*  And the blend has to be a blend, including being nothing at zero.
+
+        Parallel compression is the point of the control, but the assertion that
+        matters most is the boring end of it: at zero the stage must return the
+        samples it was given. A compressor that still colours the signal with
+        its mix down is a compressor that cannot be turned off.
+    */
+    {
+        constexpr double sr = 48000.0;
+        constexpr int length = 24000;
+        juce::AudioBuffer<float> dry(1, length);
+        for (int i = 0; i < length; ++i) dry.setSample(0, i, 0.6f * sine(220.0, i, sr, 1.0f));
+
+        const auto peakWith = [&](float mix) {
+            voxera::ColourCompressor comp;
+            comp.prepare(sr, 1);
+            comp.setType(voxera::ColourCompressor::fet);
+            comp.setThresholdDb(-30.0f);
+            comp.setRatio(12.0f);
+            comp.setMix(mix);
+            juce::AudioBuffer<float> work(1, length); work.makeCopyOf(dry);
+            comp.process(work);
+            float widest = 0.0f;
+            for (int i = 0; i < length; ++i)
+                widest = juce::jmax(widest, std::abs(work.getSample(0, i) - dry.getSample(0, i)));
+            return widest;
+        };
+
+        const float atZero = peakWith(0.0f);
+        const float atHalf = peakWith(0.5f);
+        const float atFull = peakWith(1.0f);
+        std::cout << "Comp mix: deviation from dry " << atZero << " / " << atHalf
+                  << " / " << atFull << " at 0, 50, 100%\n";
+        CHECK(atZero == 0.0f);
+        CHECK(atHalf > 0.0f && atHalf < atFull);
+    }
+
+    std::cout << "PASS: compressor characters differ in colour and in how the loop settles,"
+                 " the sidechain filter deafens the detector, the blend is exact at zero\n";
 }
 
 void checkAutoMix()

@@ -47,7 +47,11 @@ public:
     // 4: density, vocal lock, warmth, reverb tone, chop, crush, modulation and
     // glue. Every addition has to bump this, or a session saved by the previous
     // build loads without the pass that gives new parameters their defaults.
-    static constexpr int stateVersion = 4;
+    // 5: pitch engine choice, compressor sidechain filter and compressor mix.
+    // Missed on the first two of those and caught by re-reading this comment,
+    // which is the whole reason it is written as an instruction rather than as
+    // a description.
+    static constexpr int stateVersion = 5;
 
     VoxeraAudioProcessor();
     // Cancels here rather than relying on the base destructor: by the time
@@ -191,6 +195,8 @@ private:
         std::atomic<float>* compRatio {};
         std::atomic<float>* compAttack {};
         std::atomic<float>* compRelease {};
+        std::atomic<float>* compSidechain {};
+        std::atomic<float>* compMix {};
         std::atomic<float>* satDrive {};
         std::atomic<float>* satMix {};
         std::atomic<float>* spatialOn {};

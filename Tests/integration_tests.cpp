@@ -510,7 +510,8 @@ int main(int argc, char** argv)
             "space", "satDrive", "satMix", "punch", "exciter",
             "optical", "density", "clipAmount", "smartEQAmount", "vocalLock",
             "satWarmth", "compType", "pitchMode", "formant", "doubler",
-            "width", "delayMix", "reverbBody", "presenceDb", "deEss"
+            "width", "delayMix", "reverbBody", "presenceDb", "deEss",
+            "compMix", "compSidechain"
         };
         constexpr int watchedCount = static_cast<int>(std::size(watched));
 

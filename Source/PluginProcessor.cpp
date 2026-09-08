@@ -31,6 +31,8 @@ namespace ParamIDs
     static constexpr auto compRatio = "compRatio";
     static constexpr auto compAttack = "compAttack";
     static constexpr auto compRelease = "compRelease";
+    static constexpr auto compSidechain = "compSidechain";
+    static constexpr auto compMix = "compMix";
 
     static constexpr auto satDrive = "satDrive";
     static constexpr auto satMix = "satMix";
@@ -128,6 +130,8 @@ void VoxeraAudioProcessor::bindParameters()
     prm.compRatio = bind(ParamIDs::compRatio);
     prm.compAttack = bind(ParamIDs::compAttack);
     prm.compRelease = bind(ParamIDs::compRelease);
+    prm.compSidechain = bind(ParamIDs::compSidechain);
+    prm.compMix = bind(ParamIDs::compMix);
     prm.satDrive = bind(ParamIDs::satDrive);
     prm.satMix = bind(ParamIDs::satMix);
     prm.spatialOn = bind(ParamIDs::spatialOn);
@@ -299,7 +303,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxeraAudioProcessor::create
             number(ParamIDs::compThreshold, "Comp Threshold", { -48.0f, 0.0f, 0.1f }, -18.0f),
             number(ParamIDs::compRatio, "Comp Ratio", { 1.0f, 20.0f, 0.1f, 0.5f }, 3.0f),
             number(ParamIDs::compAttack, "Comp Attack", { 0.1f, 100.0f, 0.1f, 0.35f }, 8.0f),
-            number(ParamIDs::compRelease, "Comp Release", { 10.0f, 500.0f, 1.0f, 0.5f }, 90.0f)),
+            number(ParamIDs::compRelease, "Comp Release", { 10.0f, 500.0f, 1.0f, 0.5f }, 90.0f),
+            number(ParamIDs::compSidechain, "Comp Sidechain HPF", { 20.0f, 400.0f, 1.0f, 0.5f }, 85.0f),
+            number(ParamIDs::compMix, "Comp Mix", { 0.0f, 100.0f, 0.1f }, 100.0f)),
 
         group("saturation", "Saturation",
             number(ParamIDs::satDrive, "Saturation Drive", { 0.0f, 24.0f, 0.1f }, 4.0f),
@@ -803,6 +809,8 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     compressor.setRatio(prm.compRatio->load());
     compressor.setAttackMs(prm.compAttack->load());
     compressor.setReleaseMs(prm.compRelease->load());
+    compressor.setSidechainHz(prm.compSidechain->load());
+    compressor.setMix(prm.compMix->load() * 0.01f);
     compressor.process(buffer);
 
     // The slow half of the two-stage topology: the compressor above catches
@@ -1134,7 +1142,7 @@ void VoxeraAudioProcessor::applyFactoryPreset(int index)
         a preset that leaves the density, optical and clip stages at zero is
         heard as the plugin sounding thin, whatever the rest is doing.
     */
-    static constexpr int numPresetValues = 25;
+    static constexpr int numPresetValues = 27;
     static constexpr const char* ids[numPresetValues] = {
         "tuneAmount", "retune", "humanize", "toneMacro", "airDb",
         "space", "satDrive", "satMix", "punch", "exciter",
@@ -1163,7 +1171,18 @@ void VoxeraAudioProcessor::applyFactoryPreset(int index)
             depended on it.
         */
         "pitchMode", "formant", "doubler", "width",
-        "delayMix", "reverbBody", "presenceDb", "deEss"
+        "delayMix", "reverbBody", "presenceDb", "deEss",
+
+        /*  How hard the gain element is blended in, and what it is deaf to.
+
+            Parallel compression is not a refinement of the amount — it is a
+            different result. Crushing flat and sitting it under the dry keeps
+            the transient the dry still has while bringing the quiet detail and
+            the element's own distortion up underneath, and no setting of
+            threshold and ratio alone arrives at that. The style presets that
+            want an aggressive element mostly want it blended.
+        */
+        "compMix", "compSidechain"
     };
     /*  Comp: 0 Clean, 1 FET, 2 VCA, 3 Vari-Mu.  Tune mode: 0 Natural, 1 Modern, 2 Hard.
 
@@ -1188,18 +1207,18 @@ void VoxeraAudioProcessor::applyFactoryPreset(int index)
                    because it is meant to sit behind another vocal.
     */
     static constexpr float values[numFactoryPresets][numPresetValues] = {
-        // tune retune human  tone  air space drive  mix punch excite optic dens clip smrtEQ lock warm comp | mode form dbl width delay verb pres deEss
-        {   35,    30,   70,    0,   1,    8,    2,   8,   20,    15,   25,  35,   5,    20,   55,  20,   2,     0,   0,  10,   50,    5,  40,   1,  55 }, // Clean
-        {   55,    40,   60,  -30,  -1,   14,    7,  30,   35,    10,   45,  45,  12,    30,   60,  70,   3,     1,   0,  20,   60,   10,  50,   0,  50 }, // Warm
-        {  100,    75,   25,   10,   3,   18,    5,  20,   60,    50,   55,  65,  25,    40,   70,  45,   1,     1,   0,  30,   70,   15,  45,   2,  60 }, // Modern
-        {   70,    45,   65,   20,   4,   65,    3,  15,   30,    40,   40,  50,  10,    25,   50,  40,   3,     1,   0,  45,   80,   30,  70,   1,  50 }, // Dream
-        {   90,    85,   10,  -55,  -3,   10,   14,  60,   75,    35,   70,  80,  45,    35,   75,  60,   1,     2,   0,  15,   55,    8,  35,   3,  65 }, // Radio
+        // tune retune human  tone  air space drive  mix punch excite optic dens clip smrtEQ lock warm comp | mode form dbl width delay verb pres deEss | cmix schpf
+        {   35,    30,   70,    0,   1,    8,    2,   8,   20,    15,   25,  35,   5,    20,   55,  20,   2,     0,   0,  10,   50,    5,  40,   1,  55, 100,  60 }, // Clean
+        {   55,    40,   60,  -30,  -1,   14,    7,  30,   35,    10,   45,  45,  12,    30,   60,  70,   3,     1,   0,  20,   60,   10,  50,   0,  50,  85,  75 }, // Warm
+        {  100,    75,   25,   10,   3,   18,    5,  20,   60,    50,   55,  65,  25,    40,   70,  45,   1,     1,   0,  30,   70,   15,  45,   2,  60,  90,  95 }, // Modern
+        {   70,    45,   65,   20,   4,   65,    3,  15,   30,    40,   40,  50,  10,    25,   50,  40,   3,     1,   0,  45,   80,   30,  70,   1,  50,  80,  70 }, // Dream
+        {   90,    85,   10,  -55,  -3,   10,   14,  60,   75,    35,   70,  80,  45,    35,   75,  60,   1,     2,   0,  15,   55,    8,  35,   3,  65, 100, 110 }, // Radio
 
-        {  100,    98,    0,   40,   5,   12,   18,  70,   80,    65,   60,  75,  70,    30,   60,  35,   1,     2,   3,  35,   75,   15,  30,   4,  70 }, // Rage
-        {  100,    90,    5,  -10,   3,   55,   12,  55,   55,    45,   55,  60,  35,    35,   65,  55,   3,     2,  -2,  55,   85,   35,  75,   2,  60 }, // Astro
-        {   85,    60,   30,    0,   3,   45,    6,  30,   40,    40,   50,  55,  15,    35,   60,  60,   3,     1,   0,  40,   75,   28,  65,   2,  55 }, // Melodic
-        {   60,    70,   25,   15,   2,   10,   10,  40,   70,    40,   55,  60,  30,    40,   70,  40,   1,     1,   0,  15,   45,    8,  25,   3,  65 }, // Drill
-        {  100,    95,    0,   25,   5,   80,   14,  60,   45,    60,   45,  65,  45,    25,   50,  45,   1,     2,   5,  70,  100,   50,  85,   3,  60 }  // Ad-Lib
+        {  100,    98,    0,   40,   5,   12,   18,  70,   80,    65,   60,  75,  70,    30,   60,  35,   1,     2,   3,  35,   75,   15,  30,   4,  70,  75, 150 }, // Rage
+        {  100,    90,    5,  -10,   3,   55,   12,  55,   55,    45,   55,  60,  35,    35,   65,  55,   3,     2,  -2,  55,   85,   35,  75,   2,  60,  70, 120 }, // Astro
+        {   85,    60,   30,    0,   3,   45,    6,  30,   40,    40,   50,  55,  15,    35,   60,  60,   3,     1,   0,  40,   75,   28,  65,   2,  55,  85,  90 }, // Melodic
+        {   60,    70,   25,   15,   2,   10,   10,  40,   70,    40,   55,  60,  30,    40,   70,  40,   1,     1,   0,  15,   45,    8,  25,   3,  65,  65, 140 }, // Drill
+        {  100,    95,    0,   25,   5,   80,   14,  60,   45,    60,   45,  65,  45,    25,   50,  45,   1,     2,   5,  70,  100,   50,  85,   3,  60,  60, 130 }  // Ad-Lib
     };
     index = juce::jlimit(0, numFactoryPresets - 1, index);
     for (int i = 0; i < numPresetValues; ++i) set(ids[i], values[index][i]);
