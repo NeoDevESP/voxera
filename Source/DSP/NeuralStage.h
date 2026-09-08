@@ -1,6 +1,8 @@
 #pragma once
 #include <JuceHeader.h>
 #include <RTNeural/RTNeural.h>
+#include <NAM/dsp.h>
+#include <NAM/get_dsp.h>
 #include <atomic>
 #include <cmath>
 #include <memory>
@@ -17,11 +19,26 @@ namespace voxera
     same capture process works on a microphone preamp or a console channel,
     which is what makes it useful here.
 
-    Only the LSTM architecture is loaded from `.nam`. That is a deliberate
-    limit rather than an unfinished one: the WaveNet models in that ecosystem
-    are accurate but cost on the order of a tenth of a core each, and this whole
-    chain currently runs in a tenth of a core. A model that triples the plugin's
-    cost is not a model this plugin can offer.
+    The `.nam` files are read by the Neural Amp Modeler core itself rather than
+    by a loader written here. That was not the original arrangement and the
+    change was forced by evidence. A hand-written reader had the weight layout
+    wrong — it read the input and hidden matrices as two blocks where the format
+    interleaves them by row, and stepped past the trained initial state onto the
+    output head — so every real capture loaded without complaint and produced a
+    different amplifier. Using the reference implementation makes that class of
+    fault impossible rather than merely fixed.
+
+    It also decides which models exist at all. Of the first forty-one captures
+    returned for "preamp" on the largest public library, forty-one were WaveNet
+    and none were LSTM, so a stage that read only LSTM was a stage that would
+    never load anything anyone would actually download.
+
+    What is still refused is size, not architecture. WaveNet comes in several
+    widths, and the widest — sixteen channels, what that project calls
+    "standard" — costs several times the rest of this chain put together. The
+    narrower ones are a fraction of that and are what a vocal wants anyway,
+    since the job here is colour rather than reproducing a cabinet. The limit
+    below is on channel count for that reason, and it says so when it refuses.
 
     No captures are bundled. A capture uploaded by someone else carries its own
     terms, and the hardware it models carries a name that is not ours to print.
@@ -38,6 +55,46 @@ public:
         juce::String message;
         double modelSampleRate = 0.0;
     };
+
+private:
+    /*  Whichever of the two kinds of model is loaded, behind one interface.
+
+        Holding both in one object is what lets the audio thread follow a single
+        pointer. Two separate pointers would need two atomics and a rule about
+        which to read first, and a swap between formats would have a window
+        where both or neither were live.
+    */
+    struct Loaded
+    {
+        std::unique_ptr<RTNeural::Model<float>> rtneural;
+        std::unique_ptr<nam::DSP> amp;
+
+        void prepare(double rate, int maxFrames)
+        {
+            if (rtneural != nullptr) rtneural->reset();
+            // The core allocates inside Reset, so this belongs on the message
+            // thread with audio stopped, never in the processing call.
+            if (amp != nullptr) amp->Reset(rate, maxFrames);
+        }
+
+        void run(const float* in, float* out, int count)
+        {
+            if (amp != nullptr) {
+                // The core takes channel pointers even for a mono model.
+                auto* source = const_cast<float*>(in);
+                float* inputs[1] { source };
+                float* outputs[1] { out };
+                amp->process(inputs, outputs, count);
+            } else if (rtneural != nullptr) {
+                for (int i = 0; i < count; ++i) {
+                    float sample[1] { in[i] };
+                    out[i] = rtneural->forward(sample);
+                }
+            }
+        }
+    };
+
+public:
 
     void prepare(double sampleRate, int maximumBlockSize, int channels)
     {
@@ -58,7 +115,7 @@ public:
 
     void reset()
     {
-        if (auto* model = active.load(std::memory_order_acquire)) model->reset();
+        if (auto* model = active.load(std::memory_order_acquire)) model->prepare(loadedRate > 0.0 ? loadedRate : sr, capacity * 2 + 16);
         down.reset();
         up.reset();
         carry = 0.0;
@@ -86,29 +143,37 @@ public:
         try { json = nlohmann::json::parse(file.loadFileAsString().toStdString()); }
         catch (...) { result.message = "Not readable JSON."; return result; }
 
-        std::unique_ptr<RTNeural::Model<float>> built;
+        auto built = std::make_unique<Loaded>();
         double rate = 0.0;
 
         try {
             if (json.contains("architecture")) {
-                built = buildFromNam(json, rate, result.message);
-                if (built == nullptr) return result;
+                if (tooExpensive(json, result.message)) return result;
+
+                // Handed the path rather than the parsed JSON: the core reads
+                // its own format, which is the entire point of using it.
+                built->amp = nam::get_dsp(std::filesystem::path(file.getFullPathName().toStdString()));
+                if (built->amp == nullptr) { result.message = "The core could not build that capture."; return result; }
+                rate = built->amp->GetExpectedSampleRate();
+                if (!(rate > 0.0)) rate = 48000.0;   // older captures do not record one
             } else {
-                built = RTNeural::json_parser::parseJson<float>(json, true);
-                if (built == nullptr) { result.message = "Unrecognised RTNeural model."; return result; }
+                built->rtneural = RTNeural::json_parser::parseJson<float>(json, true);
+                if (built->rtneural == nullptr) { result.message = "Unrecognised RTNeural model."; return result; }
+                if (built->rtneural->getInSize() != 1 || built->rtneural->getOutSize() != 1) {
+                    result.message = "This stage needs a model with one input and one output; that one has "
+                                   + juce::String(built->rtneural->getInSize()) + " and "
+                                   + juce::String(built->rtneural->getOutSize()) + ".";
+                    return result;
+                }
             }
         } catch (const std::exception& e) {
             result.message = juce::String("Could not build the model: ") + e.what();
             return result;
         }
 
-        if (built->getInSize() != 1 || built->getOutSize() != 1) {
-            result.message = "This stage needs a model with one input and one output; that one has "
-                           + juce::String(built->getInSize()) + " and " + juce::String(built->getOutSize()) + ".";
-            return result;
-        }
-
-        built->reset();
+        // Sized for the widest block the resampler can ask for: a session slower
+        // than the capture turns one host block into rather more than one.
+        built->prepare(rate, capacity * 2 + 16);
         pending = std::move(built);
         loadedName = file.getFileNameWithoutExtension();
         loadedRate = rate;
@@ -184,12 +249,13 @@ private:
         return std::isfinite(x) ? juce::jlimit(-4.0f, 4.0f, x) : 0.0f;
     }
 
-    void runDirect(RTNeural::Model<float>* model, int count)
+    void runDirect(Loaded* model, int count)
     {
-        for (int i = 0; i < count; ++i) {
-            float sample[1] { outBuffer[static_cast<size_t>(i)] };
-            outBuffer[static_cast<size_t>(i)] = guard(model->forward(sample));
-        }
+        // Through a separate destination rather than in place: the core is not
+        // documented as tolerating aliased buffers, and scratch is already here.
+        model->run(outBuffer.data(), modelBuffer.data(), count);
+        for (int i = 0; i < count; ++i)
+            outBuffer[static_cast<size_t>(i)] = guard(modelBuffer[static_cast<size_t>(i)]);
     }
 
     /*  Runs the network at the rate it was trained on.
@@ -207,7 +273,7 @@ private:
         audible pitch error over a few minutes. Keeping the remainder means the
         long-run average is exact.
     */
-    void runResampled(RTNeural::Model<float>* model, int count)
+    void runResampled(Loaded* model, int count)
     {
         const double wanted = static_cast<double>(count) / ratio + carry;
         int modelCount = static_cast<int>(wanted);
@@ -216,10 +282,9 @@ private:
 
         down.process(ratio, outBuffer.data(), modelBuffer.data(), modelCount);
 
-        for (int i = 0; i < modelCount; ++i) {
-            float sample[1] { modelBuffer[static_cast<size_t>(i)] };
-            modelBuffer[static_cast<size_t>(i)] = guard(model->forward(sample));
-        }
+        model->run(modelBuffer.data(), modelBuffer.data(), modelCount);
+        for (int i = 0; i < modelCount; ++i)
+            modelBuffer[static_cast<size_t>(i)] = guard(modelBuffer[static_cast<size_t>(i)]);
 
         up.process(1.0 / ratio, modelBuffer.data(), outBuffer.data(), count);
     }
@@ -235,156 +300,39 @@ private:
         carry = 0.0;
     }
 
-    /*  Unpacks a Neural Amp Modeler LSTM capture.
+    /*  Refuses a capture that would cost more than the rest of the plugin.
 
-        The file stores every weight in one flat array. Getting the layout wrong
-        does not fail: the model loads, runs, and produces confident nonsense
-        that sounds like a different amplifier, so the layout is worth stating
-        exactly. Per layer, the reference implementation writes
-
-            the input and hidden weight matrices CONCATENATED SIDE BY SIDE,
-              as one (4*hidden) x (input + hidden) matrix in row order —
-              so each row holds that gate-row's input weights immediately
-              followed by its hidden weights, interleaved all the way down
-            the summed gate biases                              (4 * hidden)
-            the initial hidden state                            (hidden)
-            the initial cell state                              (hidden)
-
-        and then, once per model, the head that reduces the hidden state to one
-        sample, and the head's bias.
-
-        Two things here were wrong for a long time and both were invisible.
-        Reading the two matrices as separate contiguous blocks — which is the
-        obvious reading of "input weights, then hidden weights" — takes the
-        right number of values from the wrong places once the rows interleave.
-        And the initial states sit between the biases and the head, so skipping
-        them silently shifts the head onto somebody else's numbers.
-
-        What hid it was the test: it built its fixture with the same layout the
-        loader assumed, so the two agreed with each other and neither agreed
-        with NAM. The test alongside this now writes the layout documented
-        above and checks the result against an LSTM worked out independently,
-        which is the only version of this test that can fail.
-
-        NAM orders its gates i, f, g, o, which is the order RTNeural expects as
-        well, so the values themselves transfer without rearrangement.
+        The core will happily load any width; the judgement about whether this
+        plugin can afford it belongs here. WaveNet channel count is what decides
+        the arithmetic — sixteen is the "standard" size, and twelve, eight and
+        four are the progressively cheaper ones — so that is what is read and
+        what the message names, since a refusal that does not say what to look
+        for instead is a dead end.
     */
-    std::unique_ptr<RTNeural::Model<float>> buildFromNam(const nlohmann::json& json,
-                                                         double& rate, juce::String& message)
+    bool tooExpensive(const nlohmann::json& json, juce::String& message) const
     {
-        const auto architecture = juce::String(json.value("architecture", std::string {}));
-        if (!architecture.equalsIgnoreCase("LSTM")) {
-            message = "This build loads LSTM captures only; that file is \"" + architecture
-                    + "\". WaveNet models cost far more CPU than the rest of this plugin put together.";
-            return nullptr;
-        }
-
+        if (!json.contains("config")) return false;
         const auto& config = json.at("config");
-        const int layers = config.value("num_layers", 1);
-        const int inputSize = config.value("input_size", 1);
-        const int hidden = config.value("hidden_size", 0);
-        rate = json.value("sample_rate", 48000.0);
+        if (!config.contains("layers")) return false;
 
-        /*  Stacked layers are ordinary in these captures, so refusing them was
-            refusing most of what anyone would actually download. The format
-            simply repeats the same per-layer block, and each layer after the
-            first takes its input from the one below, so the only thing that
-            changes down the stack is the width of the input half of the matrix.
+        int widest = 0;
+        for (const auto& layer : config.at("layers"))
+            widest = juce::jmax(widest, layer.value("channels", 0));
 
-            The limits that remain are real ones. A single audio input is what
-            the format means for an amp capture, and WaveNet is refused above on
-            CPU grounds rather than format ones.
-        */
-        if (layers < 1 || layers > 4 || inputSize != 1 || hidden <= 0 || hidden > 64) {
-            message = "This stage takes LSTM captures of one to four layers, one input, "
-                      "and up to 64 hidden units; that one is "
-                    + juce::String(layers) + " x " + juce::String(hidden) + ".";
-            return nullptr;
+        if (widest > maxChannels) {
+            message = "That capture is " + juce::String(widest) + " channels wide, which costs "
+                      "several times the rest of this chain. Look for a lite, feather or nano "
+                      "capture instead — up to " + juce::String(maxChannels) + " channels.";
+            return true;
         }
-
-        const std::vector<float> weights = json.at("weights").get<std::vector<float>>();
-
-        size_t expected = static_cast<size_t>(hidden) + 1;   // the head and its bias
-        for (int layer = 0; layer < layers; ++layer) {
-            const int in = layer == 0 ? inputSize : hidden;
-            expected += static_cast<size_t>(4 * hidden * (in + hidden))   // W and U together
-                      + static_cast<size_t>(4 * hidden)                    // gate biases
-                      + static_cast<size_t>(2 * hidden);                   // initial h and c
-        }
-        if (weights.size() < expected) {
-            message = "The capture is shorter than its own configuration describes.";
-            return nullptr;
-        }
-
-        auto model = std::make_unique<RTNeural::Model<float>>(1);
-        auto dense = std::make_unique<RTNeural::Dense<float>>(hidden, 1);
-
-        size_t at = 0;
-        const int gates = 4 * hidden;
-
-        for (int layer = 0; layer < layers; ++layer)
-        {
-            // Only the first layer takes the audio; the rest are fed the layer
-            // below, so their input half is as wide as the hidden state.
-            const int in = layer == 0 ? inputSize : hidden;
-            const int stride = in + hidden;
-
-            auto lstm = std::make_unique<RTNeural::LSTMLayer<float>>(in, hidden);
-
-            /*  Walked row by row across the combined matrix, splitting each row
-                at the input/hidden boundary. RTNeural wants the transpose of
-                this — indexed by source first and gate second — so the two
-                loops below scatter rather than copy.
-            */
-            std::vector<std::vector<float>> W(static_cast<size_t>(in),
-                                              std::vector<float>(static_cast<size_t>(gates)));
-            std::vector<std::vector<float>> U(static_cast<size_t>(hidden),
-                                              std::vector<float>(static_cast<size_t>(gates)));
-            for (int r = 0; r < gates; ++r) {
-                const size_t row = at + static_cast<size_t>(r) * static_cast<size_t>(stride);
-                for (int i = 0; i < in; ++i)
-                    W[static_cast<size_t>(i)][static_cast<size_t>(r)] = weights[row + static_cast<size_t>(i)];
-                for (int h = 0; h < hidden; ++h)
-                    U[static_cast<size_t>(h)][static_cast<size_t>(r)] =
-                        weights[row + static_cast<size_t>(in + h)];
-            }
-            at += static_cast<size_t>(gates) * static_cast<size_t>(stride);
-
-            lstm->setWVals(W);
-            lstm->setUVals(U);
-
-            std::vector<float> gateBias(static_cast<size_t>(gates));
-            for (auto& b : gateBias) b = weights[at++];
-            lstm->setBVals(gateBias);
-
-            /*  The trained initial state is stepped over rather than applied.
-
-                It is what the network had settled to at the start of the
-                capture, and a plugin does not start at the start of anything —
-                it starts wherever the singer dropped in. RTNeural begins from
-                zero, which after a handful of samples is where a stable
-                recurrent layer ends up regardless. What matters is that these
-                values are consumed here: leaving them in the stream shifts
-                everything after them onto the wrong numbers, which is not an
-                approximation but a different model.
-            */
-            at += static_cast<size_t>(2 * hidden);
-
-            model->addLayer(lstm.release());
-        }
-
-        std::vector<std::vector<float>> headWeights(1, std::vector<float>(static_cast<size_t>(hidden)));
-        for (int h = 0; h < hidden; ++h) headWeights[0][static_cast<size_t>(h)] = weights[at++];
-        dense->setWeights(headWeights);
-        const float headBias = weights[at++];
-        dense->setBias(&headBias);
-
-        model->addLayer(dense.release());
-        return model;
+        return false;
     }
 
-    std::atomic<RTNeural::Model<float>*> active { nullptr };
-    std::unique_ptr<RTNeural::Model<float>> current, pending;
+    // Twelve keeps NAM's lite, feather and nano sizes and turns away standard.
+    static constexpr int maxChannels = 12;
+
+    std::atomic<Loaded*> active { nullptr };
+    std::unique_ptr<Loaded> current, pending;
     juce::SmoothedValue<float> mix;
     juce::String loadedName;
 

@@ -195,7 +195,10 @@ int main(int argc, char** argv)
         weights.insert(weights.end(), head.begin(), head.end());
         weights.push_back(headBias);
 
-        juce::String json = "{\"architecture\":\"LSTM\",\"config\":{\"num_layers\":1,"
+        // The core requires the header fields a real capture carries, so the
+        // fixture writes them: a missing "version" is rejected as a null string
+        // rather than as a missing field, which reads like a corrupt file.
+        juce::String json = "{\"version\":\"0.5.4\",\"architecture\":\"LSTM\",\"config\":{\"num_layers\":1,"
                             "\"input_size\":1,\"hidden_size\":" + juce::String(hidden)
                           + "},\"sample_rate\":48000,\"weights\":[";
         for (size_t i = 0; i < weights.size(); ++i)
@@ -416,7 +419,7 @@ int main(int argc, char** argv)
             flat.insert(flat.end(), deepHead.begin(), deepHead.end());
             flat.push_back(deepHeadBias);
 
-            juce::String deepJson = "{\"architecture\":\"LSTM\",\"config\":{\"num_layers\":"
+            juce::String deepJson = "{\"version\":\"0.5.4\",\"architecture\":\"LSTM\",\"config\":{\"num_layers\":"
                                   + juce::String(deepLayers) + ",\"input_size\":1,\"hidden_size\":"
                                   + juce::String(deepHidden) + "},\"sample_rate\":48000,\"weights\":[";
             for (size_t i = 0; i < flat.size(); ++i)
@@ -520,13 +523,16 @@ int main(int argc, char** argv)
             CHECK(std::abs(latest - earliest) < 0.02f);
         }
 
-        // A WaveNet capture has to be refused clearly rather than half-loaded.
+        // An oversized capture has to be refused clearly rather than half-loaded.
         const auto wave = scratch.getChildFile("wavenet.nam");
         wave.deleteFile();
-        CHECK(wave.replaceWithText("{\"architecture\":\"WaveNet\",\"config\":{},\"weights\":[0]}"));
+        CHECK(wave.replaceWithText("{\"version\":\"0.5.4\",\"architecture\":\"WaveNet\","
+                                             "\"config\":{\"layers\":[{\"channels\":16}]},\"weights\":[0]}"));
         const auto refused = n.loadNeuralModel(wave);
         CHECK(!refused.ok);
-        CHECK(refused.message.containsIgnoreCase("LSTM"));
+        // Refused on width now, not on architecture: WaveNet is accepted,
+        // but not at the size that costs more than the rest of the chain.
+        CHECK(refused.message.containsIgnoreCase("channels"));
         std::cout << "NEURAL refusal: " << refused.message << "\n";
         n.unloadNeuralModel();
         CHECK(!n.hasNeuralModel());

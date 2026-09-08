@@ -48,6 +48,34 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(RTNeural)
 
+# The official NAM inference core, MIT licensed.
+#
+# Hand-writing the .nam loader was a mistake, and a measurable one: the weight
+# layout was read wrongly for months and the model that came out was not the one
+# in the file. This is the implementation every other NAM plugin uses, and it
+# reads the format by definition rather than by my reading of it.
+#
+# It also unlocks the library. A survey of the first forty-one models returned
+# for "preamp" on TONE3000 found forty-one WaveNets and no LSTMs at all, so an
+# LSTM-only stage is one that never loads anything anyone would download.
+#
+# It shares Eigen with RTNeural, which is already vendored above, so this adds
+# no new third-party maths dependency.
+FetchContent_Declare(
+    NeuralAmpModelerCore
+    GIT_REPOSITORY https://github.com/sdatkinson/NeuralAmpModelerCore.git
+    GIT_TAG 1f42f88535884450104b8711d7595019afa0495b   # v0.5.4
+    # Fetched but deliberately not configured. Its own CMakeLists exists only to
+    # build command-line tools we have no use for, and those pass GCC-style
+    # warning flags that MSVC rejects outright, so adding it fails the Windows
+    # build for the sake of two programs nobody here runs. Pointing this at a
+    # directory that holds no CMakeLists tells FetchContent to download the
+    # sources and stop, which is all we want: the translation units are compiled
+    # into the plugin target below.
+    SOURCE_SUBDIR  no-build-here
+)
+FetchContent_MakeAvailable(NeuralAmpModelerCore)
+
 # Component inspector, for development only. Two layout faults in this project
 # were found by rendering the editor to a PNG and looking at it; this shows the
 # same information live. It is off by default and must never enter a release
@@ -126,7 +154,49 @@ target_sources(VOXERA PRIVATE
     Source/DSP/VoiceMatch.h
     Source/DSP/AutoMix.h
     ${rubberband_SOURCE_DIR}/single/RubberBandSingle.cpp
+
 )
+
+
+# The NAM core as its own archive, linked whole.
+#
+# It ships no library target, so its translation units have to be compiled
+# somewhere; the reason they are not simply added to the plugin is that the core
+# registers each architecture's parser from a namespace-scope object inside the
+# file that implements it. Nothing in this project refers to those files by
+# name, so the linker discards them from the archive along with their
+# registrations, and every real capture is then refused at load with "no config
+# parser registered" — a message that reads like a corrupt file rather than a
+# link-time decision. WHOLE_ARCHIVE keeps them.
+#
+# Referencing the parser functions directly would also keep them, and was tried
+# first. It does not work here: the core vendors nlohmann 3.12 while RTNeural
+# vendors 3.11, those versions use different inline namespaces, and a function
+# taking a json argument therefore has a different mangled name on each side of
+# the boundary.
+add_library(voxera_nam_core STATIC
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/activations.cpp
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/container.cpp
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/conv1d.cpp
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/convnet.cpp
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/dsp.cpp
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/get_dsp.cpp
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/linear.cpp
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/lstm.cpp
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/ring_buffer.cpp
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/util.cpp
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/wavenet/model.cpp
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/wavenet/a2_fast.cpp
+    ${neuralampmodelercore_SOURCE_DIR}/NAM/wavenet/slimmable.cpp
+)
+target_include_directories(voxera_nam_core PUBLIC
+    ${neuralampmodelercore_SOURCE_DIR}
+    ${neuralampmodelercore_SOURCE_DIR}/Dependencies/eigen
+    ${neuralampmodelercore_SOURCE_DIR}/Dependencies/nlohmann
+)
+target_compile_definitions(voxera_nam_core PUBLIC NAM_SAMPLE_FLOAT=1)
+set_target_properties(voxera_nam_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 
 target_include_directories(VOXERA PRIVATE
     ${rubberband_SOURCE_DIR}
@@ -139,6 +209,10 @@ target_compile_definitions(VOXERA
         JUCE_VST3_CAN_REPLACE_VST2=0
         RUBBERBAND_STATIC=1
         NOMINMAX   # prevent Windows min/max macros from breaking std::min/std::max in RubberBand
+        # The core is double-precision by default. A vocal chain that is float
+        # everywhere else would otherwise convert every sample twice per block
+        # for no audible return.
+        NAM_SAMPLE_FLOAT=1
         VOXERA_WITH_INSPECTOR=$<BOOL:${VOXERA_UI_INSPECTOR}>
 )
 
@@ -161,6 +235,10 @@ target_link_libraries(VOXERA
         RTNeural
         $<$<BOOL:${VOXERA_UI_INSPECTOR}>:melatonin_inspector>
     PUBLIC
+        # Whole, and PUBLIC so the instruction reaches the link of the VST3 and
+        # the tests rather than stopping at this static library.
+        "$<LINK_LIBRARY:WHOLE_ARCHIVE,voxera_nam_core>"
+    PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
@@ -181,7 +259,7 @@ if(VOXERA_BUILD_TESTS)
         string(TOLOWER ${testName} sourceName)
         add_executable(VOXERA_${testName}Tests Tests/${sourceName}_tests.cpp)
         target_include_directories(VOXERA_${testName}Tests PRIVATE Tests/headers ${rubberband_SOURCE_DIR})
-        target_compile_definitions(VOXERA_${testName}Tests PRIVATE JucePlugin_Name="VOXERA")
+        target_compile_definitions(VOXERA_${testName}Tests PRIVATE JucePlugin_Name="VOXERA" NAM_SAMPLE_FLOAT=1)
         target_link_libraries(VOXERA_${testName}Tests PRIVATE VOXERA RTNeural juce::juce_audio_utils juce::juce_dsp)
         add_test(NAME ${sourceName} COMMAND VOXERA_${testName}Tests "${CMAKE_CURRENT_BINARY_DIR}/test-previews")
     endforeach()
