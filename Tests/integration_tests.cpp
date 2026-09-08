@@ -367,6 +367,124 @@ int main(int argc, char** argv)
         CHECK(std::isfinite(throughChain));
         CHECK(std::abs(throughChain - 0.1) > 0.01);
 
+        /*  A two-layer capture, which is what most downloadable LSTM models are.
+
+            Stacking is where the format is easiest to get wrong: every layer
+            after the first is fed the one below, so its input half is as wide
+            as the hidden state rather than one column, and a loader that keeps
+            using the first layer's stride walks off into the wrong numbers
+            without ever reading past the end of the array. That produces a
+            model which loads, runs, and is not the one in the file — the same
+            silent failure the single-layer layout had.
+
+            Checked the same way: an independent forward pass, written here.
+        */
+        {
+            const int deepHidden = 3;
+            const int deepGates = 4 * deepHidden;
+            const int deepLayers = 2;
+
+            // Per layer: the combined matrix, the biases, then h0 and c0.
+            std::vector<std::vector<double>> mats(deepLayers);
+            std::vector<std::vector<double>> biases(deepLayers);
+            std::vector<double> flat;
+
+            for (int layer = 0; layer < deepLayers; ++layer) {
+                const int in = layer == 0 ? 1 : deepHidden;
+                const int deepStride = in + deepHidden;
+                mats[static_cast<size_t>(layer)].resize(static_cast<size_t>(deepGates * deepStride));
+                for (int r = 0; r < deepGates; ++r)
+                    for (int c = 0; c < deepStride; ++c)
+                        mats[static_cast<size_t>(layer)][static_cast<size_t>(r * deepStride + c)]
+                            = 0.03 * (r + 1) + 0.017 * (c + 1) + 0.11 * layer;
+
+                biases[static_cast<size_t>(layer)].resize(static_cast<size_t>(deepGates));
+                for (int r = 0; r < deepGates; ++r)
+                    biases[static_cast<size_t>(layer)][static_cast<size_t>(r)] = -0.25 + 0.04 * r - 0.06 * layer;
+
+                flat.insert(flat.end(), mats[static_cast<size_t>(layer)].begin(),
+                                        mats[static_cast<size_t>(layer)].end());
+                flat.insert(flat.end(), biases[static_cast<size_t>(layer)].begin(),
+                                        biases[static_cast<size_t>(layer)].end());
+                for (int h = 0; h < deepHidden; ++h) flat.push_back(4.0 + h + layer);   // h0
+                for (int h = 0; h < deepHidden; ++h) flat.push_back(7.0 + h + layer);   // c0
+            }
+
+            std::vector<double> deepHead(static_cast<size_t>(deepHidden));
+            for (int h = 0; h < deepHidden; ++h) deepHead[static_cast<size_t>(h)] = 0.05 + 0.02 * h;
+            const double deepHeadBias = 0.015;
+            flat.insert(flat.end(), deepHead.begin(), deepHead.end());
+            flat.push_back(deepHeadBias);
+
+            juce::String deepJson = "{\"architecture\":\"LSTM\",\"config\":{\"num_layers\":"
+                                  + juce::String(deepLayers) + ",\"input_size\":1,\"hidden_size\":"
+                                  + juce::String(deepHidden) + "},\"sample_rate\":48000,\"weights\":[";
+            for (size_t i = 0; i < flat.size(); ++i)
+                deepJson += (i ? "," : "") + juce::String(flat[i], 6);
+            deepJson += "]}";
+
+            const auto deepFile = scratch.getChildFile("two-layer.nam");
+            deepFile.deleteFile();
+            CHECK(deepFile.replaceWithText(deepJson));
+
+            voxera::NeuralStage deep;
+            deep.prepare(48000.0, 256, 1);
+            const auto loaded2 = deep.load(deepFile);
+            std::cout << "NEURAL two-layer load: " << loaded2.message << "\n";
+            CHECK(loaded2.ok);
+            deep.commitLoad();
+            deep.setMix(1.0f);
+
+            juce::AudioBuffer<float> deepProbe(1, 256);
+            for (int block = 0; block < 40; ++block) {
+                for (int i = 0; i < 256; ++i) deepProbe.setSample(0, i, static_cast<float>(x));
+                deep.process(deepProbe);
+            }
+
+            // The reference: both layers stepped in order, the second fed the first.
+            std::vector<std::vector<double>> hs(static_cast<size_t>(deepLayers),
+                                                std::vector<double>(static_cast<size_t>(deepHidden), 0.0));
+            std::vector<std::vector<double>> cs = hs;
+            for (int step = 0; step < 40 * 256; ++step) {
+                std::vector<double> feed { x };
+                for (int layer = 0; layer < deepLayers; ++layer) {
+                    const int in = static_cast<int>(feed.size());
+                    const int deepStride = in + deepHidden;
+                    auto& h = hs[static_cast<size_t>(layer)];
+                    auto& c = cs[static_cast<size_t>(layer)];
+                    std::vector<double> z(static_cast<size_t>(deepGates));
+                    for (int r = 0; r < deepGates; ++r) {
+                        double sum = biases[static_cast<size_t>(layer)][static_cast<size_t>(r)];
+                        for (int i = 0; i < in; ++i)
+                            sum += mats[static_cast<size_t>(layer)][static_cast<size_t>(r * deepStride + i)]
+                                 * feed[static_cast<size_t>(i)];
+                        for (int k = 0; k < deepHidden; ++k)
+                            sum += mats[static_cast<size_t>(layer)][static_cast<size_t>(r * deepStride + in + k)]
+                                 * h[static_cast<size_t>(k)];
+                        z[static_cast<size_t>(r)] = sum;
+                    }
+                    for (int k = 0; k < deepHidden; ++k) {
+                        const double gi = sigmoid(z[static_cast<size_t>(k)]);
+                        const double gf = sigmoid(z[static_cast<size_t>(deepHidden + k)]);
+                        const double gg = std::tanh(z[static_cast<size_t>(2 * deepHidden + k)]);
+                        const double go = sigmoid(z[static_cast<size_t>(3 * deepHidden + k)]);
+                        c[static_cast<size_t>(k)] = gf * c[static_cast<size_t>(k)] + gi * gg;
+                        h[static_cast<size_t>(k)] = go * std::tanh(c[static_cast<size_t>(k)]);
+                    }
+                    feed = h;
+                }
+            }
+
+            double deepExpected = deepHeadBias;
+            for (int k = 0; k < deepHidden; ++k)
+                deepExpected += deepHead[static_cast<size_t>(k)]
+                              * hs[static_cast<size_t>(deepLayers - 1)][static_cast<size_t>(k)];
+
+            const double deepGot = deepProbe.getSample(0, 255);
+            std::cout << "NEURAL two-layer output: " << deepGot << " expected " << deepExpected << "\n";
+            CHECK(std::abs(deepGot - deepExpected) < 0.001);
+        }
+
         /*  The same capture in a session at a different rate.
 
             A capture is resampled so the network keeps running at the rate it

@@ -285,66 +285,93 @@ private:
         const int hidden = config.value("hidden_size", 0);
         rate = json.value("sample_rate", 48000.0);
 
-        if (layers != 1 || inputSize != 1 || hidden <= 0) {
-            message = "Only single-layer, single-input captures are supported here.";
+        /*  Stacked layers are ordinary in these captures, so refusing them was
+            refusing most of what anyone would actually download. The format
+            simply repeats the same per-layer block, and each layer after the
+            first takes its input from the one below, so the only thing that
+            changes down the stack is the width of the input half of the matrix.
+
+            The limits that remain are real ones. A single audio input is what
+            the format means for an amp capture, and WaveNet is refused above on
+            CPU grounds rather than format ones.
+        */
+        if (layers < 1 || layers > 4 || inputSize != 1 || hidden <= 0 || hidden > 64) {
+            message = "This stage takes LSTM captures of one to four layers, one input, "
+                      "and up to 64 hidden units; that one is "
+                    + juce::String(layers) + " x " + juce::String(hidden) + ".";
             return nullptr;
         }
 
         const std::vector<float> weights = json.at("weights").get<std::vector<float>>();
-        const size_t expected = static_cast<size_t>(4 * hidden * (inputSize + hidden))  // W and U
-                              + static_cast<size_t>(4 * hidden)                          // gate biases
-                              + static_cast<size_t>(2 * hidden)                          // initial h and c
-                              + static_cast<size_t>(hidden) + 1;                         // head and its bias
+
+        size_t expected = static_cast<size_t>(hidden) + 1;   // the head and its bias
+        for (int layer = 0; layer < layers; ++layer) {
+            const int in = layer == 0 ? inputSize : hidden;
+            expected += static_cast<size_t>(4 * hidden * (in + hidden))   // W and U together
+                      + static_cast<size_t>(4 * hidden)                    // gate biases
+                      + static_cast<size_t>(2 * hidden);                   // initial h and c
+        }
         if (weights.size() < expected) {
             message = "The capture is shorter than its own configuration describes.";
             return nullptr;
         }
 
         auto model = std::make_unique<RTNeural::Model<float>>(1);
-        auto lstm = std::make_unique<RTNeural::LSTMLayer<float>>(inputSize, hidden);
         auto dense = std::make_unique<RTNeural::Dense<float>>(hidden, 1);
 
         size_t at = 0;
         const int gates = 4 * hidden;
-        const int stride = inputSize + hidden;
 
-        /*  Walked row by row across the combined matrix, splitting each row at
-            the input/hidden boundary. RTNeural wants the transpose of this —
-            indexed by source first and gate second — so the two loops below
-            scatter rather than copy.
-        */
-        std::vector<std::vector<float>> W(static_cast<size_t>(inputSize),
-                                          std::vector<float>(static_cast<size_t>(gates)));
-        std::vector<std::vector<float>> U(static_cast<size_t>(hidden),
-                                          std::vector<float>(static_cast<size_t>(gates)));
-        for (int r = 0; r < gates; ++r) {
-            const size_t row = at + static_cast<size_t>(r) * static_cast<size_t>(stride);
-            for (int i = 0; i < inputSize; ++i)
-                W[static_cast<size_t>(i)][static_cast<size_t>(r)] = weights[row + static_cast<size_t>(i)];
-            for (int h = 0; h < hidden; ++h)
-                U[static_cast<size_t>(h)][static_cast<size_t>(r)] =
-                    weights[row + static_cast<size_t>(inputSize + h)];
+        for (int layer = 0; layer < layers; ++layer)
+        {
+            // Only the first layer takes the audio; the rest are fed the layer
+            // below, so their input half is as wide as the hidden state.
+            const int in = layer == 0 ? inputSize : hidden;
+            const int stride = in + hidden;
+
+            auto lstm = std::make_unique<RTNeural::LSTMLayer<float>>(in, hidden);
+
+            /*  Walked row by row across the combined matrix, splitting each row
+                at the input/hidden boundary. RTNeural wants the transpose of
+                this — indexed by source first and gate second — so the two
+                loops below scatter rather than copy.
+            */
+            std::vector<std::vector<float>> W(static_cast<size_t>(in),
+                                              std::vector<float>(static_cast<size_t>(gates)));
+            std::vector<std::vector<float>> U(static_cast<size_t>(hidden),
+                                              std::vector<float>(static_cast<size_t>(gates)));
+            for (int r = 0; r < gates; ++r) {
+                const size_t row = at + static_cast<size_t>(r) * static_cast<size_t>(stride);
+                for (int i = 0; i < in; ++i)
+                    W[static_cast<size_t>(i)][static_cast<size_t>(r)] = weights[row + static_cast<size_t>(i)];
+                for (int h = 0; h < hidden; ++h)
+                    U[static_cast<size_t>(h)][static_cast<size_t>(r)] =
+                        weights[row + static_cast<size_t>(in + h)];
+            }
+            at += static_cast<size_t>(gates) * static_cast<size_t>(stride);
+
+            lstm->setWVals(W);
+            lstm->setUVals(U);
+
+            std::vector<float> gateBias(static_cast<size_t>(gates));
+            for (auto& b : gateBias) b = weights[at++];
+            lstm->setBVals(gateBias);
+
+            /*  The trained initial state is stepped over rather than applied.
+
+                It is what the network had settled to at the start of the
+                capture, and a plugin does not start at the start of anything —
+                it starts wherever the singer dropped in. RTNeural begins from
+                zero, which after a handful of samples is where a stable
+                recurrent layer ends up regardless. What matters is that these
+                values are consumed here: leaving them in the stream shifts
+                everything after them onto the wrong numbers, which is not an
+                approximation but a different model.
+            */
+            at += static_cast<size_t>(2 * hidden);
+
+            model->addLayer(lstm.release());
         }
-        at += static_cast<size_t>(gates) * static_cast<size_t>(stride);
-
-        lstm->setWVals(W);
-        lstm->setUVals(U);
-
-        std::vector<float> gateBias(static_cast<size_t>(gates));
-        for (auto& b : gateBias) b = weights[at++];
-        lstm->setBVals(gateBias);
-
-        /*  The trained initial state is stepped over rather than applied.
-
-            It is what the network had settled to at the start of the capture,
-            and a plugin does not start at the start of anything — it starts
-            wherever the singer dropped in. RTNeural begins from zero, which
-            after a handful of samples is where a stable recurrent layer ends up
-            regardless. What matters is that these values are consumed here:
-            leaving them in the stream shifts the head onto them, which is not
-            an approximation but a different model.
-        */
-        at += static_cast<size_t>(2 * hidden);
 
         std::vector<std::vector<float>> headWeights(1, std::vector<float>(static_cast<size_t>(hidden)));
         for (int h = 0; h < hidden; ++h) headWeights[0][static_cast<size_t>(h)] = weights[at++];
@@ -352,7 +379,6 @@ private:
         const float headBias = weights[at++];
         dense->setBias(&headBias);
 
-        model->addLayer(lstm.release());
         model->addLayer(dense.release());
         return model;
     }
