@@ -34,6 +34,8 @@ public:
         controlCountdown = 0;
         bypassBlend.reset(sr, 0.020);
         bypassBlend.setCurrentAndTargetValue(enabled ? 1.0f : 0.0f);
+        toneBlend.reset(sr, 0.020);
+        toneBlend.setCurrentAndTargetValue(enabled ? 1.0f : 0.0f);
         numChannels = juce::jlimit(1, 2, channels);
         ring.fill(0.0f);
         fftData.fill(0.0f);
@@ -75,6 +77,9 @@ public:
     {
         controlCountdown = 0;
         bypassBlend.setCurrentAndTargetValue(enabled ? 1.0f : 0.0f);
+        // Both halves, or the tone section keeps whatever fade position it was
+        // left in and comes back at the wrong level after a transport stop.
+        toneBlend.setCurrentAndTargetValue(enabled ? 1.0f : 0.0f);
         ring.fill(0.0f);
         fftData.fill(0.0f);
         spectrumDb.fill(-120.0f);
@@ -141,7 +146,45 @@ public:
                 float x = resonance1.processSample(ch, dry);
                 x = resonance2.processSample(ch, x);
                 x = deEsserFilter.processSample(ch, x);
-                x = bodyShelf.processSample(ch, x);
+                output = dry + wet * (x - dry);
+            }
+        }
+    }
+
+    /*  The tone half, run separately so it can sit after the dynamics.
+
+        These three shelves and the bell are the only part of this stage that
+        adds anything; everything above takes away. The distinction decides
+        where each belongs, and it is the oldest rule in the chain: what you
+        remove goes before the compressor, what you add goes after.
+
+        Removing first means the compressor is not reacting to mud and
+        sibilance that were on their way out anyway — it works on the signal
+        that is actually staying. Adding afterwards means the compressor cannot
+        undo the boost: a presence lift made ahead of it is simply louder in
+        the band the detector is watching, so the compressor pulls it straight
+        back down and the control ends up fighting itself, which is heard as an
+        EQ that stops doing much past a certain point.
+
+        This used to run as one block ahead of the dynamics, so the additive
+        half was in exactly that position.
+    */
+    void processTone(juce::AudioBuffer<float>& buffer)
+    {
+        if (buffer.getNumSamples() == 0) return;
+
+        // Its own smoother, advanced once per sample like the other, so the two
+        // halves fade together rather than one lagging the other by a block.
+        toneBlend.setTargetValue(enabled ? 1.0f : 0.0f);
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const float wet = toneBlend.getNextValue();
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            {
+                auto& output = buffer.getWritePointer(ch)[i];
+                const float dry = output;
+                float x = bodyShelf.processSample(ch, dry);
                 x = presenceBell.processSample(ch, x);
                 x = airShelf.processSample(ch, x);
                 output = dry + wet * (x - dry);
@@ -510,7 +553,7 @@ private:
              / static_cast<float>(fftSize);
     }
 
-    juce::SmoothedValue<float> bypassBlend;
+    juce::SmoothedValue<float> bypassBlend, toneBlend;
     int controlInterval = 48, controlCountdown = 0;
     double sr = 48000.0;
     int numChannels = 2;

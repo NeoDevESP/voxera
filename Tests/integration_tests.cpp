@@ -760,7 +760,71 @@ int main(int argc, char** argv)
     restored.getStateInformation(state);
     auto after = juce::AudioProcessor::getXmlFromBinary(state.getData(), static_cast<int>(state.getSize()));
     CHECK(after->getChildByName("VoiceProfile")->getDoubleAttribute("rms") == -18.0);
-    std::cout << "PASS state roundtrip: parameters and voice profile\n";
+    /*  Every toggle, saved and restored, the way pluginval exercises it.
+
+        pluginval reports a state-restore failure on a randomly chosen toggle
+        each run — a different one every time, always a bool, always reading
+        back the un-snapped normalised value it was set with rather than the 0
+        or 1 a bool should give. That pattern could be the plugin failing to
+        restore, or it could be an artefact of the host wrapper reading a
+        normalised value that never round-trips through a two-state parameter.
+
+        The two have completely different fixes, so this settles which it is
+        without the wrapper in the way: set every toggle, save, flip them all,
+        restore, and require the original states back exactly.
+    */
+    {
+        VoxeraAudioProcessor p;
+        std::vector<juce::AudioParameterBool*> toggles;
+        for (auto* parameter : p.getParameters())
+            if (auto* flag = dynamic_cast<juce::AudioParameterBool*>(parameter)) {
+                // analyzeVoice is deliberately cleared when a session is saved:
+                // it triggers an eight-second listen, and reopening a project
+                // should not start one. Excluded because restoring it would be
+                // the bug, not restoring it correctly.
+                if (flag->paramID == "analyzeVoice") continue;
+                toggles.push_back(flag);
+            }
+        CHECK(!toggles.empty());
+
+        // A mixed pattern rather than all-on, so a restore that simply leaves
+        // the defaults in place cannot pass by coincidence.
+        std::vector<bool> wanted;
+        for (size_t i = 0; i < toggles.size(); ++i) {
+            const bool state = (i % 2) == 0;
+            wanted.push_back(state);
+            toggles[i]->setValueNotifyingHost(state ? 1.0f : 0.0f);
+        }
+
+        juce::MemoryBlock saved;
+        p.getStateInformation(saved);
+
+        for (size_t i = 0; i < toggles.size(); ++i)
+            toggles[i]->setValueNotifyingHost(wanted[i] ? 0.0f : 1.0f);
+
+        p.setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
+
+        int wrong = 0;
+        for (size_t i = 0; i < toggles.size(); ++i) {
+            const bool got = toggles[i]->get();
+            // Read through the base pointer: the subclass makes getValue private.
+            const float normalised = static_cast<juce::AudioProcessorParameter*>(toggles[i])->getValue();
+            if (got != wanted[i]) {
+                ++wrong;
+                std::cout << "  toggle not restored: " << toggles[i]->paramID
+                          << " wanted " << wanted[i] << " got " << got
+                          << " (normalised " << normalised << ")\n";
+            }
+            // A bool must read back as one of the two values it can hold, not
+            // as whatever fraction was last written at it.
+            CHECK(normalised == 0.0f || normalised == 1.0f);
+        }
+        std::cout << "STATE: " << toggles.size() << " toggles round-tripped, "
+                  << wrong << " wrong\n";
+        CHECK(wrong == 0);
+    }
+
+    std::cout << "PASS state roundtrip: parameters and voice profile, every toggle\n";
     juce::AudioBuffer<float> previewAudio(2, 24000);
     for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < 24000; ++i)
         previewAudio.setSample(ch, i, 0.1f * (std::sin(i * 0.0288f) + 0.3f * std::sin(i * 0.0576f)));

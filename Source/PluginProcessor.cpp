@@ -790,10 +790,6 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     voiceMatch.setAmount(prm.voiceMatch->load() * 0.01f);
     voiceMatch.process(buffer);
 
-    // Before the dynamics stages, so they respond to the voice as coloured
-    // rather than to one the listener never hears.
-    character.process(buffer);
-
     float compThreshold = prm.compThreshold->load();
 
     if (profile.ready && autoVoice > 0.0f)
@@ -830,6 +826,26 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     // just opened rather than fighting an already-dense signal.
     punch.setAmount(prm.punch->load() * 0.01f);
     punch.process(buffer);
+
+    /*  Tone and character, after every dynamics stage and before any harmonic
+        one — the position they occupy on a professional vocal chain, and for a
+        reason rather than by convention.
+
+        What is taken away belongs ahead of the compressors, so they work on the
+        signal that is staying instead of reacting to mud and sibilance already
+        on their way out. What is added belongs behind them, because a boost
+        made in front of a compressor is simply more level in the band the
+        detector is watching: the compressor pulls it back down, and the control
+        appears to stop working past a certain point. Both of these ran before
+        the dynamics until now, so the presence and air controls were fighting
+        the compressor for the same decibels, and the voice character was being
+        levelled away by the stage after it.
+
+        Then the harmonic stages hear the voice already shaped, which is the
+        other half of the arrangement: saturation follows tone, never leads it.
+    */
+    spectralEngine.processTone(buffer);
+    character.process(buffer);
 
     /*  Before the saturator, in the place a preamp occupies on a real desk:
         these captures are of the stage a microphone hits first, so anything
