@@ -6,3 +6,9 @@ dist/
 *.suo
 .DS_Store
 build-insp/
+
+# Claves de API: nunca en el repositorio. La herramienta las lee del entorno.
+*.key
+.env
+secrets.*
+Tools/*.local.ps1
