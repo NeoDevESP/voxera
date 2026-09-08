@@ -174,23 +174,22 @@ voxera::NeuralStage::LoadResult VoxeraAudioProcessor::loadNeuralModel(const juce
     auto result = neural.load(file);
     if (!result.ok) return result;
 
+    const double session = getSampleRate() > 0.0 ? getSampleRate() : 48000.0;
+
     suspendProcessing(true);
     neural.commitLoad();
-    neural.prepare(getSampleRate() > 0.0 ? getSampleRate() : 48000.0, getTotalNumOutputChannels());
+    neural.prepare(session, preparedBlockSize, getTotalNumOutputChannels());
     suspendProcessing(false);
 
     loadedNeuralFile = file;
 
-    /*  A capture is trained at one rate and behaves as a different circuit at
-        any other, because a recurrent network's state advances per sample and
-        not per second. Saying so is more use than silently sounding wrong.
-    */
-    const double session = getSampleRate();
-    if (result.modelSampleRate > 0.0 && session > 0.0
-        && std::abs(result.modelSampleRate - session) > 1.0)
-        result.message += " — trained at " + juce::String(result.modelSampleRate, 0)
-                        + " Hz, session is " + juce::String(session, 0)
-                        + " Hz, so it will not sound as captured.";
+    // Reported rather than warned about: the stage now runs the network at its
+    // own rate whatever the session is doing, so this is information about what
+    // is happening and not a caveat about it sounding wrong.
+    if (result.modelSampleRate > 0.0 && std::abs(result.modelSampleRate - session) > 1.0)
+        result.message += " — captured at " + juce::String(result.modelSampleRate, 0)
+                        + " Hz and resampled to run at that rate in a "
+                        + juce::String(session, 0) + " Hz session.";
 
     return result;
 }
@@ -383,7 +382,7 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     crush.prepare(sampleRate, getTotalNumOutputChannels());
     modulation.prepare(sampleRate, getTotalNumOutputChannels());
     chop.prepare(sampleRate, getTotalNumOutputChannels());
-    neural.prepare(sampleRate, getTotalNumOutputChannels());
+    neural.prepare(sampleRate, samplesPerBlock, getTotalNumOutputChannels());
     glue.prepare(sampleRate, getTotalNumOutputChannels());
     softClip.prepare(sampleRate, getTotalNumOutputChannels());
     saturator.prepare(spec);

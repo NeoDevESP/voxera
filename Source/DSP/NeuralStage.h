@@ -39,10 +39,18 @@ public:
         double modelSampleRate = 0.0;
     };
 
-    void prepare(double sampleRate, int channels)
+    void prepare(double sampleRate, int maximumBlockSize, int channels)
     {
         sr = (std::isfinite(sampleRate) && sampleRate > 0.0) ? sampleRate : 48000.0;
         numChannels = juce::jlimit(1, 2, channels);
+        capacity = juce::jmax(1, maximumBlockSize);
+
+        // Worst case is the session running slower than the model, where one
+        // block of input becomes more than a block of model-rate samples.
+        modelBuffer.assign(static_cast<size_t>(capacity) * 4u + 16u, 0.0f);
+        outBuffer.assign(static_cast<size_t>(capacity) + 16u, 0.0f);
+
+        updateRatio();
         mix.reset(sr, 0.050);
         mix.setCurrentAndTargetValue(0.0f);
         reset();
@@ -51,6 +59,9 @@ public:
     void reset()
     {
         if (auto* model = active.load(std::memory_order_acquire)) model->reset();
+        down.reset();
+        up.reset();
+        carry = 0.0;
         mix.setCurrentAndTargetValue(mix.getTargetValue());
     }
 
@@ -113,6 +124,7 @@ public:
     {
         active.store(pending.get(), std::memory_order_release);
         current = std::move(pending);
+        updateRatio();
     }
 
     void unload()
@@ -139,30 +151,90 @@ public:
             the two channels drift apart inside a recurrent layer that carries
             state from sample to sample.
         */
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
-        {
+        const int count = buffer.getNumSamples();
+
+        // Mono sum in: the network has one input, and running it twice would
+        // double the cost while letting the two channels drift apart inside a
+        // layer that carries state from sample to sample.
+        for (int i = 0; i < count; ++i) {
+            float sum = 0.0f;
+            for (int ch = 0; ch < channels; ++ch) sum += buffer.getReadPointer(ch)[i];
+            outBuffer[static_cast<size_t>(i)] = sum / static_cast<float>(channels);
+        }
+
+        if (resampling) runResampled(model, count);
+        else            runDirect(model, count);
+
+        for (int i = 0; i < count; ++i) {
             const float wet = mix.getNextValue();
-
-            float input = 0.0f;
-            for (int ch = 0; ch < channels; ++ch) input += buffer.getReadPointer(ch)[i];
-            input /= static_cast<float>(channels);
-
-            float sample[1] { input };
-            const float output = model->forward(sample);
-
-            // A network can be pushed into producing anything; a stage in the
-            // middle of a chain must never hand on something that is not a
-            // number, or every meter and filter after it is poisoned.
-            const float safe = std::isfinite(output) ? juce::jlimit(-4.0f, 4.0f, output) : 0.0f;
-
+            const float processed = outBuffer[static_cast<size_t>(i)];
             for (int ch = 0; ch < channels; ++ch) {
                 auto& value = buffer.getWritePointer(ch)[i];
-                value += wet * (safe - value);
+                value += wet * (processed - value);
             }
         }
     }
 
 private:
+    // A network can be driven into producing anything; a stage in the middle of
+    // a chain must never pass on something that is not a number, or every meter
+    // and filter after it is poisoned.
+    static float guard(float x) noexcept
+    {
+        return std::isfinite(x) ? juce::jlimit(-4.0f, 4.0f, x) : 0.0f;
+    }
+
+    void runDirect(RTNeural::Model<float>* model, int count)
+    {
+        for (int i = 0; i < count; ++i) {
+            float sample[1] { outBuffer[static_cast<size_t>(i)] };
+            outBuffer[static_cast<size_t>(i)] = guard(model->forward(sample));
+        }
+    }
+
+    /*  Runs the network at the rate it was trained on.
+
+        A capture is a recurrent network whose state advances once per sample,
+        so its time constants are defined in samples and not in seconds. Feed it
+        44.1 kHz audio when it learned at 48 and every one of them stretches by
+        nine per cent: the attack of the modelled circuit changes, and the
+        capture stops being a capture. Resampling around it is what makes the
+        session rate stop mattering.
+
+        The fractional carry is the part that has to be right. Asking for a
+        rounded number of model-rate samples each block would drift against the
+        input by a fraction of a sample every time, and that accumulates into
+        audible pitch error over a few minutes. Keeping the remainder means the
+        long-run average is exact.
+    */
+    void runResampled(RTNeural::Model<float>* model, int count)
+    {
+        const double wanted = static_cast<double>(count) / ratio + carry;
+        int modelCount = static_cast<int>(wanted);
+        carry = wanted - static_cast<double>(modelCount);
+        modelCount = juce::jlimit(1, static_cast<int>(modelBuffer.size()), modelCount);
+
+        down.process(ratio, outBuffer.data(), modelBuffer.data(), modelCount);
+
+        for (int i = 0; i < modelCount; ++i) {
+            float sample[1] { modelBuffer[static_cast<size_t>(i)] };
+            modelBuffer[static_cast<size_t>(i)] = guard(model->forward(sample));
+        }
+
+        up.process(1.0 / ratio, modelBuffer.data(), outBuffer.data(), count);
+    }
+
+    void updateRatio()
+    {
+        // Below a tenth of a percent the difference is inaudible and not worth
+        // two interpolators in the path.
+        resampling = loadedRate > 0.0 && std::abs(loadedRate - sr) / sr > 0.001;
+        ratio = resampling ? sr / loadedRate : 1.0;
+        down.reset();
+        up.reset();
+        carry = 0.0;
+    }
+
     /*  Unpacks a Neural Amp Modeler LSTM capture.
 
         The file stores every weight in one flat array, in the order the
@@ -238,7 +310,13 @@ private:
     std::unique_ptr<RTNeural::Model<float>> current, pending;
     juce::SmoothedValue<float> mix;
     juce::String loadedName;
+
+    juce::LagrangeInterpolator down, up;
+    std::vector<float> modelBuffer, outBuffer;
+    double ratio = 1.0, carry = 0.0;
+    bool resampling = false;
+
     double sr = 48000.0, loadedRate = 0.0;
-    int numChannels = 2;
+    int numChannels = 2, capacity = 1;
 };
 }

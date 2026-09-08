@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(VOXERA VERSION 1.0.0 LANGUAGES C CXX)
+project(VOXERA VERSION 1.5.0 LANGUAGES C CXX)
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -70,16 +70,16 @@ juce_add_plugin(VOXERA
     COMPANY_NAME "Trevor Deey Labs"
     # The unique id a host uses is derived from these codes, so every build that
     # should appear separately in the rack needs its own. Vx01 is the frozen
-    # 0.8, Vx10 and Vx20 the development builds, and this is Vx30. Reusing a
-    # code would make the host update that entry instead of adding a plugin, and
-    # would leave two files claiming one identity.
-    BUNDLE_ID "com.trevordeey.voxera10"
+    # 0.8; Vx10 and Vx20 were development builds; Vx30 is the 1.0; this is the
+    # 1.5. Reusing a code would make the host update that entry instead of
+    # adding a plugin, and would leave two files claiming one identity.
+    BUNDLE_ID "com.trevordeey.voxera15"
     PLUGIN_MANUFACTURER_CODE Tdly
-    PLUGIN_CODE Vx30
+    PLUGIN_CODE Vx40
     # AU is macOS-only and JUCE drops it elsewhere, but without it Logic Pro and
     # GarageBand cannot see the plugin at all: neither host loads VST3.
     FORMATS VST3 AU Standalone
-    PRODUCT_NAME "VOXERA 1.0"
+    PRODUCT_NAME "VOXERA 1.5"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE

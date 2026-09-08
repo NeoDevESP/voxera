@@ -1,4 +1,19 @@
-# Validación VOXERA 0.8.0
+# Validación VOXERA 1.5
+
+## Etapa neuronal
+
+- Formato `.nam` verificado contra un cálculo independiente. El test escribe una captura sintética cuyos sesgos saturan todas las puertas del LSTM, de modo que la salida en régimen se deriva a mano: **0,9976 medido frente a 1,0116 esperado**. Unos puntos de corte equivocados en el array plano de pesos darían un modelo que carga, ejecuta y no se parece a nada, un fallo que ningún cierre inesperado revelaría.
+- Remuestreo sin deriva: con un modelo de 48 kHz en una sesión a 44,1 kHz y entrada constante, la salida mide **0,99762 en el bloque 100 y 0,99762 en el 899** — cinco segundos sin desplazamiento. Una deriva de fracción de muestra por bloque se acumularía hasta ser audible.
+- Las capturas WaveNet se rechazan con un mensaje que explica el motivo, en vez de cargarse a medias.
+- El intercambio de modelo suspende el procesado, porque el hilo de audio mantiene un puntero crudo mientras ejecuta.
+
+## Coste de CPU
+
+Medido con la máquina en reposo, cinco pasadas: **9,90× a 10,04× tiempo real**, dispersión del 1,5 %. Son **10,0 % de un núcleo**, unas diez instancias simultáneas.
+
+Rubber Band es más de la mitad de esa cifra y el 92 % de la latencia. Las medidas tomadas con el DAW o con UAD Console abiertos dieron entre 11,8 % y 15,8 %, una dispersión mayor que las diferencias que se pretendía comparar; **no sirven** y no se usan aquí.
+
+# Validación heredada de 0.8.0
 
 ## Ejecutado y aprobado en Linux
 

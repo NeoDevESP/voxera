@@ -204,6 +204,41 @@ int main(int argc, char** argv)
         std::cout << "NEURAL output: " << got << " expected about " << expected << "\n";
         CHECK(std::abs(got - expected) < 0.05);
 
+        /*  The same capture in a session at a different rate.
+
+            A capture is resampled so the network keeps running at the rate it
+            learned at. What that has to not do is drift: asking for a rounded
+            number of model-rate samples every block loses a fraction of a
+            sample each time, and over minutes that becomes audible. Running a
+            long stretch and checking the tail is still steady is what catches
+            it — a drifting resampler shows up as the level wandering, not as an
+            obvious fault in the first few blocks.
+        */
+        {
+            VoxeraAudioProcessor r;
+            CHECK(r.loadNeuralModel(file).ok);
+            set(r, "neuralMix", 100.0f);
+            for (const auto* id : { "pitchOn", "spectralOn", "spatialOn", "gateOn", "limiterOn" })
+                set(r, id, 0.0f);
+            set(r, "autoGain", 0.0f); set(r, "satMix", 0.0f); set(r, "smartEQAmount", 0.0f);
+            r.prepareToPlay(44100.0, 256);   // model is 48 kHz, session is not
+
+            juce::AudioBuffer<float> rb(2, 256);
+            float earliest = 0.0f, latest = 0.0f;
+            for (int block = 0; block < 900; ++block) {   // about five seconds
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < 256; ++i) rb.setSample(ch, i, 0.1f);
+                r.processBlock(rb, midi);
+                for (int i = 0; i < 256; ++i) CHECK(std::isfinite(rb.getSample(0, i)));
+                if (block == 100) earliest = rb.getSample(0, 200);
+                if (block == 899) latest = rb.getSample(0, 200);
+            }
+            std::cout << "NEURAL resampled 44.1k: " << earliest << " early, " << latest << " late\n";
+            // Steady input, steady output: any wander here is the resampler
+            // losing its place against the clock.
+            CHECK(std::abs(latest - earliest) < 0.02f);
+        }
+
         // A WaveNet capture has to be refused clearly rather than half-loaded.
         const auto wave = scratch.getChildFile("wavenet.nam");
         wave.deleteFile();
