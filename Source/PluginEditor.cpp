@@ -165,6 +165,14 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
                        "afterwards, and the move can be undone.");
     savePreset.onClick = [this] { filePreset(true); };
     loadPreset.onClick = [this] { filePreset(false); };
+    learnVoice.onClick = [this] {
+        if (processor.hasVoiceReference()) processor.clearVoiceReference();
+        else processor.requestVoiceReference();
+    };
+    learnVoice.setTooltip("Learns the tonal balance of the take playing now, over six seconds. "
+                          "Other takes can then be matched to it with the Voice Match control, "
+                          "so a session recorded on a different day or at a different distance "
+                          "from the microphone still sits with the rest. Click again to forget it.");
     loadModel.onClick = [this] { chooseNeuralModel(); };
     loadModel.setTooltip("Loads a Neural Amp Modeler capture (.nam) or an RTNeural model (.json) "
                          "and runs it where a preamp would sit. Captures of microphone preamps and "
@@ -188,7 +196,8 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
         repaint();
     };
     addAndMakeVisible(motion);
-    for (auto* b : {&analyze, &autoMix, &savePreset, &loadPreset, &loadModel, &bypass, &lowLatency})
+    for (auto* b : {&analyze, &autoMix, &learnVoice, &savePreset, &loadPreset, &loadModel,
+                    &bypass, &lowLatency})
         addAndMakeVisible(b);
     advancedEditor = std::make_unique<juce::GenericAudioProcessorEditor>(processor);
     advancedViewport.setViewedComponent(advancedEditor.get(), false);
@@ -217,6 +226,7 @@ void VoxeraAudioProcessorEditor::selectPage(int page)
     }
     for (auto& b : presets) b.setVisible(page == 2);
     analyze.setVisible(page == 0); autoMix.setVisible(page == 0);
+    learnVoice.setVisible(page == 0);
     savePreset.setVisible(page == 2); loadPreset.setVisible(page == 2);
     loadModel.setVisible(page == 2);
     advancedViewport.setVisible(page == 3);
@@ -272,8 +282,11 @@ void VoxeraAudioProcessorEditor::resized()
         place(c.label, 195 + i * 240, 350, 150, 22);
         place(c.slider, 195 + i * 240, 384, 150, 104);
     }
-    place(analyze, 98, 442, 190, 33);
-    place(autoMix, 98, 481, 190, 33);
+    // Three buttons where there used to be two, and the dark panel's inner edge
+    // is at about y=520: shorter and tighter so the last one stays inside it.
+    place(analyze, 98, 430, 190, 26);
+    place(autoMix, 98, 459, 190, 26);
+    place(learnVoice, 98, 488, 190, 26);
     for (int i = 0; i < 6; ++i) {
         auto& c = *controls[static_cast<size_t>(8 + i)];
         place(c.label, 115 + i * 157, 350, 120, 22);
@@ -307,6 +320,15 @@ void VoxeraAudioProcessorEditor::timerCallback()
     outPeak = juce::jmax(processor.meters.peakDb.load(), outPeak - 1.3f);
     const bool running = processor.capturing.load();
     analyze.setEnabled(!running);
+
+    // The button says what it will do next, so there is no separate indicator
+    // to read for whether a reference exists.
+    if (processor.isLearningReference())
+        learnVoice.setButtonText("LEARNING "
+            + juce::String(static_cast<int>(processor.referenceProgress() * 100.0f)) + "%");
+    else
+        learnVoice.setButtonText(processor.hasVoiceReference() ? "FORGET THIS VOICE"
+                                                              : "LEARN THIS VOICE");
     // The full reasoning does not fit on the panel, so it lives here. Compared
     // before assigning: this runs thirty times a second and the text changes
     // only when an analysis finishes.

@@ -21,6 +21,7 @@
 #include "DSP/Modulation.h"
 #include "DSP/NeuralStage.h"
 #include "DSP/ColourCompressor.h"
+#include "DSP/VoiceMatch.h"
 #include "DSP/SoftClip.h"
 #include "DSP/Character.h"
 #include "DSP/AutoMix.h"
@@ -61,6 +62,17 @@ public:
         the controls away.
     */
     void requestAutoMix() noexcept { autoMixRequested.store(true); captureRequested.store(true); }
+
+    /*  Learns the spectral shape of the take now playing, so later takes can be
+        matched to it. Voice conversion where the target is the singer's own
+        best day rather than somebody else's voice.
+    */
+    void requestVoiceReference() noexcept { referenceRequested.store(true); }
+    bool isLearningReference() const noexcept { return voiceMatch.isCapturing(); }
+    float referenceProgress() const noexcept { return voiceMatch.captureProgress(); }
+    bool hasVoiceReference() const noexcept { return voiceMatch.hasReference(); }
+    float voiceMatchRangeDb() const noexcept { return voiceMatch.appliedRangeDb(); }
+    void clearVoiceReference() noexcept { voiceMatch.clearReference(); }
     bool isAutoMixPending() const noexcept { return autoMixRequested.load(); }
 
     void applyFactoryPreset(int index);
@@ -211,6 +223,7 @@ private:
         std::atomic<float>* glue {};
         std::atomic<float>* neuralMix {};
         std::atomic<float>* compType {};
+        std::atomic<float>* voiceMatch {};
     } prm;
 
     // The chain can report two different latencies. Both are worked out once in
@@ -231,6 +244,7 @@ private:
     ProfileTransfer publishedProfile, pendingProfile;
     std::atomic<bool> captureRequested { false };
     std::atomic<bool> autoMixRequested { false };
+    std::atomic<bool> referenceRequested { false };
     voxera::IntegerDelay dryDelay;
     juce::AudioBuffer<float> dryBuffer;
     juce::SmoothedValue<float> globalWet;
@@ -248,6 +262,7 @@ private:
     voxera::Optical optical;
     voxera::Upward upward;
     voxera::VocalLock vocalLock;
+    voxera::VoiceMatch voiceMatch;
     voxera::Punch punch;
     voxera::Exciter exciter;
     voxera::Character character;

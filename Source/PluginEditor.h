@@ -58,6 +58,7 @@ private:
     juce::TextButton analyze { "ANALYZE VOICE" }, savePreset { "SAVE PRESET" }, loadPreset { "LOAD PRESET" };
     juce::TextButton autoMix { "AUTO MIX (8s)" };
     juce::TextButton loadModel { "LOAD NEURAL MODEL" };
+    juce::TextButton learnVoice { "LEARN THIS VOICE" };
     void chooseNeuralModel();
     void applyNeuralModel(const juce::File&);
     juce::TextButton bypass { "BYPASS" };

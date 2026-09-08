@@ -321,6 +321,109 @@ int main(int argc, char** argv)
         }
     }
 
+    /*  Voice Match, end to end.
+
+        A reference is learned from one take, then a second take of the same
+        voice recorded darker — the way a step back from the microphone or a
+        different day actually changes it — is measured before and after. What
+        has to happen is that the second take's balance moves towards the first.
+
+        Measuring the distance between the two spectra in decibels is the only
+        honest test here: checking that some filter moved would pass even if it
+        moved the wrong way.
+    */
+    {
+        const auto runTake = [&](VoxeraAudioProcessor& p, float tilt, int seconds,
+                                 juce::AudioBuffer<float>* collect) {
+            const int blocks = seconds * 48000 / 512;
+            int written = 0;
+            for (int n = 0; n < blocks; ++n) {
+                juce::AudioBuffer<float> b(2, 512);
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < 512; ++i) {
+                        const auto t = static_cast<float>(n * 512 + i) / 48000.0f;
+                        // A voice-like stack: fundamental, some mids, some air.
+                        // `tilt` darkens it by pulling the top down.
+                        const float v = 0.30f * std::sin(juce::MathConstants<float>::twoPi * 200.0f * t)
+                                      + 0.18f * std::sin(juce::MathConstants<float>::twoPi * 900.0f * t)
+                                      + 0.14f * tilt * std::sin(juce::MathConstants<float>::twoPi * 3200.0f * t)
+                                      + 0.10f * tilt * std::sin(juce::MathConstants<float>::twoPi * 6400.0f * t);
+                        b.setSample(ch, i, v);
+                    }
+                p.processBlock(b, midi);
+                if (collect != nullptr && written + 512 <= collect->getNumSamples()) {
+                    collect->copyFrom(0, written, b, 0, 0, 512);
+                    written += 512;
+                }
+            }
+        };
+
+        const auto quiet = [](VoxeraAudioProcessor& p) {
+            for (const auto* id : { "pitchOn", "spectralOn", "spatialOn", "gateOn", "limiterOn" })
+                set(p, id, 0.0f);
+            for (const auto* id : { "smartEQAmount", "vocalLock", "punch", "exciter", "optical",
+                                    "density", "clipAmount", "satMix", "satWarmth", "glue" })
+                set(p, id, 0.0f);
+            set(p, "autoGain", 0.0f);
+            set(p, "compType", 0.0f);
+            set(p, "compThreshold", 0.0f);
+        };
+
+        // Learn from a bright take.
+        VoxeraAudioProcessor learner;
+        quiet(learner);
+        learner.prepareToPlay(48000.0, 512);
+        learner.requestVoiceReference();
+        runTake(learner, 1.0f, 8, nullptr);
+        CHECK(learner.hasVoiceReference());
+
+        // Carry the reference into a fresh instance, as reopening a session does.
+        juce::MemoryBlock stored;
+        learner.getStateInformation(stored);
+
+        const auto topToBottom = [](const juce::AudioBuffer<float>& b) {
+            // Ratio of energy above 2 kHz to energy below it, in decibels.
+            Biquad low, high;
+            low.prepare(48000.0, 1); low.setLowPass(2000.0);
+            high.prepare(48000.0, 1); high.setHighPass(2000.0);
+            double lowSum = 0.0, highSum = 0.0;
+            for (int i = 0; i < b.getNumSamples(); ++i) {
+                const float x = b.getSample(0, i);
+                const float l = low.processSample(0, x), h = high.processSample(0, x);
+                lowSum += static_cast<double>(l) * l;
+                highSum += static_cast<double>(h) * h;
+            }
+            return 10.0 * std::log10(juce::jmax(1.0e-12, highSum) / juce::jmax(1.0e-12, lowSum));
+        };
+
+        juce::AudioBuffer<float> without(1, 48000 * 4), with(1, 48000 * 4);
+
+        VoxeraAudioProcessor off;
+        off.setStateInformation(stored.getData(), static_cast<int>(stored.getSize()));
+        quiet(off);
+        set(off, "voiceMatch", 0.0f);
+        off.prepareToPlay(48000.0, 512);
+        runTake(off, 0.35f, 6, &without);      // the darker take, uncorrected
+
+        VoxeraAudioProcessor on;
+        on.setStateInformation(stored.getData(), static_cast<int>(stored.getSize()));
+        CHECK(on.hasVoiceReference());          // the reference survived the session
+        quiet(on);
+        set(on, "voiceMatch", 100.0f);
+        on.prepareToPlay(48000.0, 512);
+        runTake(on, 0.35f, 6, &with);          // the same take, matched
+
+        const double target = topToBottom(without) ;
+        const double corrected = topToBottom(with);
+        std::cout << "VOICE MATCH: dark take " << target << " dB top/bottom, matched "
+                  << corrected << " dB (reference was brighter)\n";
+
+        for (int i = 0; i < with.getNumSamples(); ++i) CHECK(std::isfinite(with.getSample(0, i)));
+        // The reference is brighter, so matching has to lift the ratio.
+        CHECK(corrected > target + 0.5);
+        CHECK(on.voiceMatchRangeDb() > 0.5f);
+    }
+
     /*  Smart EQ inside the whole chain, not on its own.
 
         Its unit test passes, so if it seems to do nothing in use the cause is

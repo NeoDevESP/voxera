@@ -82,6 +82,7 @@ namespace ParamIDs
     static constexpr auto glue = "glue";
     static constexpr auto neuralMix = "neuralMix";
     static constexpr auto compType = "compType";
+    static constexpr auto voiceMatch = "voiceMatch";
 }
 
 VoxeraAudioProcessor::VoxeraAudioProcessor()
@@ -169,6 +170,7 @@ void VoxeraAudioProcessor::bindParameters()
     prm.glue = bind(ParamIDs::glue);
     prm.neuralMix = bind(ParamIDs::neuralMix);
     prm.compType = bind(ParamIDs::compType);
+    prm.voiceMatch = bind(ParamIDs::voiceMatch);
 }
 
 juce::File VoxeraAudioProcessor::neuralModelFolder()
@@ -370,7 +372,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxeraAudioProcessor::create
 
         group("comptype", "Compressor Character",
             choice(ParamIDs::compType, "Comp Character",
-                { "Clean", "FET", "VCA", "Vari-Mu" }, 1)));
+                { "Clean", "FET", "VCA", "Vari-Mu" }, 1)),
+
+        group("match", "Voice Match",
+            number(ParamIDs::voiceMatch, "Voice Match", { 0.0f, 100.0f, 0.1f }, 0.0f)));
 
     return layout;
 }
@@ -402,6 +407,7 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     optical.prepare(sampleRate, getTotalNumOutputChannels());
     upward.prepare(sampleRate, getTotalNumOutputChannels());
     vocalLock.prepare(sampleRate, getTotalNumOutputChannels());
+    voiceMatch.prepare(sampleRate, getTotalNumOutputChannels());
     punch.prepare(spec);
     exciter.prepare(sampleRate, getTotalNumOutputChannels());
     character.prepare(sampleRate, getTotalNumOutputChannels());
@@ -466,6 +472,7 @@ void VoxeraAudioProcessor::releaseResources()
     optical.reset();
     upward.reset();
     vocalLock.reset();
+    voiceMatch.reset();
     punch.reset();
     exciter.reset();
     character.reset();
@@ -709,6 +716,21 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
         prm.smartEQRange->load(), prm.smartEQResponse->load());
     smartEQ.process(buffer);
 
+    /*  Matched to the reference take before the dynamics, so the compressors
+        respond to the voice as it will be heard.
+
+        Reads the same shared spectrum as the Smart EQ, which is of this chain's
+        signal before either stage corrects it — the same point the reference
+        was captured from, which is what makes comparing them meaningful.
+    */
+    if (referenceRequested.exchange(false)) voiceMatch.startCapture(6.0f);
+    voiceMatch.useSpectrum(spectralEngine.analysisMagnitudes(),
+                           AdaptiveSpectralEngine::analysisBinCount,
+                           spectralEngine.analysisBinHz(),
+                           spectralEngine.analysisScale());
+    voiceMatch.setAmount(prm.voiceMatch->load() * 0.01f);
+    voiceMatch.process(buffer);
+
     // Before the dynamics stages, so they respond to the voice as coloured
     // rather than to one the listener never hears.
     character.process(buffer);
@@ -893,6 +915,20 @@ void VoxeraAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     // way of redistributing it without meaning to.
     if (loadedNeuralFile.existsAsFile())
         state.setProperty("neuralModel", loadedNeuralFile.getFullPathName(), nullptr);
+
+    /*  The voice reference travels with the session. It is eight numbers, and
+        without it the Voice Match control would be a knob that does nothing
+        every time a project is reopened — which is worse than not having it.
+    */
+    if (voiceMatch.hasReference()) {
+        auto stored = state.getChildWithName("VoiceReference");
+        if (stored.isValid()) state.removeChild(stored, nullptr);
+        juce::ValueTree shape("VoiceReference");
+        const auto& reference = voiceMatch.getReference();
+        for (int b = 0; b < voxera::VoiceMatch::numBands; ++b)
+            shape.setProperty("b" + juce::String(b), reference.shapeDb[static_cast<size_t>(b)], nullptr);
+        state.addChild(shape, -1, nullptr);
+    }
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     copyXmlToBinary(*xml, destData);
 }
@@ -941,6 +977,21 @@ void VoxeraAudioProcessor::setStateInformation(const void* data, int sizeInBytes
         // Silently ignored when the file has moved or the session was written on
         // another machine: the mix control is restored either way, so the worst
         // case is a chain with that stage doing nothing rather than a failure.
+        if (const auto shape = state.getChildWithName("VoiceReference"); shape.isValid()) {
+            voxera::VoiceMatch::Reference reference;
+            bool sane = true;
+            for (int b = 0; b < voxera::VoiceMatch::numBands; ++b) {
+                const float value = shape.getProperty("b" + juce::String(b), 0.0f);
+                // A stored shape that is not finite or is wildly out of range
+                // came from a corrupt session; a silent default beats applying
+                // sixty decibels of correction to somebody's vocal.
+                if (!std::isfinite(value) || std::abs(value) > 60.0f) { sane = false; break; }
+                reference.shapeDb[static_cast<size_t>(b)] = value;
+            }
+            reference.ready = sane;
+            if (sane) voiceMatch.setReference(reference);
+        }
+
         if (const auto path = state.getProperty("neuralModel").toString(); path.isNotEmpty()) {
             if (const juce::File file(path); file.existsAsFile()) loadNeuralModel(file);
         }
