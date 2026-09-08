@@ -43,7 +43,9 @@ public:
         lift.setHighPass(liftHz, 0.707);
 
         releaseCoeff = 1.0f - std::exp(-1.0f / static_cast<float>(sr * releaseSeconds));
+        broadbandCoeff = 1.0f - std::exp(-1.0f / static_cast<float>(sr * broadbandSeconds));
         envelope.fill(0.0f);
+        broadband.fill(0.0f);
 
         amount.reset(sr, 0.030);
         amount.setCurrentAndTargetValue(0.0f);
@@ -55,6 +57,7 @@ public:
         band.reset();
         lift.reset();
         envelope.fill(0.0f);
+        broadband.fill(0.0f);
         amount.setCurrentAndTargetValue(amount.getTargetValue());
     }
 
@@ -84,7 +87,28 @@ public:
                 // smaller still, so near-silence stays silent.
                 const float generated = source * source / juce::jmax(env, envelopeFloor);
 
-                sample += wet * drive * lift.processSample(ch, generated);
+                /*  Held back on sibilants.
+
+                    The band this stage squares is the band an "s" lives in, so
+                    left alone it generates hardest exactly when it should be
+                    generating least — and it sits downstream of the de-esser,
+                    so nothing afterwards takes back what it added. Comparing
+                    the band against the whole signal is enough to tell them
+                    apart: a sung vowel puts most of its energy below this band
+                    and a sibilant puts most of it inside.
+                */
+                /*  A peak follower, matching the band's, because comparing a
+                    peak against a mean would inflate the ratio by however
+                    crest-shaped the signal happens to be and read every loud
+                    vowel as a sibilant.
+                */
+                auto& wide = broadband[static_cast<size_t>(ch)];
+                const float wideMagnitude = std::abs(sample);
+                wide = juce::jmax(wideMagnitude, wide + broadbandCoeff * (wideMagnitude - wide));
+                const float sibilance = juce::jlimit(0.0f, 1.0f,
+                    (env / juce::jmax(wide, envelopeFloor) - sibilanceOnset) / sibilanceRange);
+
+                sample += wet * drive * (1.0f - sibilance) * lift.processSample(ch, generated);
             }
         }
     }
@@ -94,13 +118,23 @@ private:
     static constexpr double bandTopHz = 8000.0;  // 2x this must stay under Nyquist
     static constexpr double liftHz = 7000.0;     // keeps only what the squaring created
     static constexpr double releaseSeconds = 0.030;
+    static constexpr double broadbandSeconds = 0.020;
     static constexpr float envelopeFloor = 1.0e-6f;
     static constexpr float drive = 0.5f;
+    /*  Where the band starts to dominate the whole signal, and over how much
+        further it takes the generation all the way down.
+
+        A sung vowel keeps most of its peak below 3.5 kHz, so the band reads
+        around half the whole signal at most. A sibilant has almost nothing
+        outside the band and reads near unity. Sixty per cent sits between the
+        two with room on either side.
+    */
+    static constexpr float sibilanceOnset = 0.60f, sibilanceRange = 0.30f;
 
     Biquad split, band, lift;
     juce::SmoothedValue<float> amount;
-    std::array<float, 2> envelope {};
-    float releaseCoeff = 1.0f;
+    std::array<float, 2> envelope {}, broadband {};
+    float releaseCoeff = 1.0f, broadbandCoeff = 1.0f;
     double sr = 48000.0;
     int numChannels = 2;
 };

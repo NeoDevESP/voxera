@@ -215,12 +215,20 @@ void checkExciter()
         constexpr int length = 16384;
         constexpr double fundamental = 4000.0;
         juce::AudioBuffer<float> dry(2, length);
-        // 4 kHz sits inside the excited band, so squaring must put its whole
-        // output at 8 kHz. Any energy at 12 kHz would be a third harmonic, which
-        // a second-order stage cannot produce — that is what separates this from
-        // a saturator, whose third harmonic would also alias at 44.1 kHz.
+        /*  A voice, not a bare tone: a low fundamental with some content in the
+            excited band on top. The band alone would read as a sibilant to the
+            guard below and be held back, which is correct behaviour and useless
+            for measuring what the squaring produces.
+
+            4 kHz sits inside the band, so squaring must put its whole output at
+            8 kHz. Anything at 12 kHz would be a third harmonic, which a
+            second-order stage cannot make — that is what separates this from a
+            saturator, whose third harmonic would also alias at 44.1 kHz. The
+            180 Hz part is below the split filter and never reaches the squarer.
+        */
         for (int ch = 0; ch < 2; ++ch)
-            for (int i = 0; i < length; ++i) dry.setSample(ch, i, sine(fundamental, i, sr, 0.25f));
+            for (int i = 0; i < length; ++i)
+                dry.setSample(ch, i, sine(180.0, i, sr, 0.30f) + sine(fundamental, i, sr, 0.25f));
 
         voxera::Exciter off; off.prepare(sr, 2); off.setAmount(0.0f);
         juce::AudioBuffer<float> silentPath(2, length); silentPath.makeCopyOf(dry);
@@ -244,6 +252,46 @@ void checkExciter()
         const float third = toneMagnitude(generated, sr, 3.0 * fundamental);
         CHECK(second > 1.0e-3f);
         CHECK(third < second * 0.02f);
+
+        /*  And it has to hold back on a sibilant.
+
+            The band this stage squares is the band an "s" occupies, and it runs
+            after the de-esser, so anything it adds there is never taken back.
+            A vowel puts most of its energy below the band; a sibilant puts most
+            of it inside. Feeding one of each and comparing what comes out is
+            what shows the guard is working.
+        */
+        /*  Both signals carry the same amount of band content, and differ only
+            in what surrounds it. That is what isolates the guard: comparing a
+            vowel against a sibilant outright would mostly measure how much
+            band energy each happens to have, which is not the question.
+        */
+        const auto excite = [&](bool sibilant) {
+            voxera::Exciter e; e.prepare(sr, 2); e.setAmount(1.0f);
+            juce::AudioBuffer<float> b(2, length), reference(2, length);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < length; ++i) {
+                    const float inBand = sine(6000.0, i, sr, 0.20f);
+                    // Identical in the band; the vowel simply has a fundamental
+                    // underneath it and the sibilant has nothing.
+                    const float v = sibilant ? inBand : sine(180.0, i, sr, 0.35f) + inBand;
+                    b.setSample(ch, i, v);
+                    reference.setSample(ch, i, v);
+                }
+            e.process(b);
+            double sum = 0.0;
+            for (int i = length / 2; i < length; ++i) {
+                const double d = b.getSample(0, i) - reference.getSample(0, i);
+                sum += d * d;
+            }
+            return std::sqrt(sum / (length / 2));
+        };
+
+        const double onVowel = excite(false);
+        const double onSibilant = excite(true);
+        std::cout << "Exciter " << sr << "Hz: same band content adds " << onVowel
+                  << " under a vowel, " << onSibilant << " on its own\n";
+        CHECK(onSibilant < onVowel * 0.5);
         std::cout << "Exciter " << sr << "Hz: 2nd harmonic " << second
                   << ", 3rd " << third << " (" << (100.0f * third / second) << "%)\n";
     }
