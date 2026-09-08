@@ -20,6 +20,7 @@
 #include "DSP/Chop.h"
 #include "DSP/Modulation.h"
 #include "DSP/NeuralStage.h"
+#include "DSP/ColourCompressor.h"
 #include "DSP/SoftClip.h"
 #include "DSP/Character.h"
 #include "DSP/AutoMix.h"
@@ -72,6 +73,7 @@ public:
     float gateReductionDb() const noexcept { return gate.getReductionDb(); }
     int reportedLatencySamples() const noexcept { return activeLatencySamples.load(); }
     float opticalReductionDb() const noexcept { return optical.getReductionDb(); }
+    float compressorReductionDb() const noexcept { return compressor.getReductionDb(); }
     float densityLiftDb() const noexcept { return upward.getLiftDb(); }
     // Shown in the editor so the singer can see the chain following their range.
     float lockHighPassHz() const noexcept { return vocalLock.highPassHz(); }
@@ -208,6 +210,7 @@ private:
         std::atomic<float>* modMix {};
         std::atomic<float>* glue {};
         std::atomic<float>* neuralMix {};
+        std::atomic<float>* compType {};
     } prm;
 
     // The chain can report two different latencies. Both are worked out once in
@@ -237,7 +240,7 @@ private:
     PitchEngine pitchEngine;
     AdaptiveSpectralEngine spectralEngine;
     SmartEQ smartEQ;
-    juce::dsp::Compressor<float> compressor;
+    voxera::ColourCompressor compressor;
     Saturator saturator;
     SpatialEngine spatialEngine;
     VoiceProfileEngine voiceProfile;

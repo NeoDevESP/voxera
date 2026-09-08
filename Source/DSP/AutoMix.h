@@ -40,6 +40,7 @@ struct MixSettings
     float satDrive = 4.0f;
     float satMix = 15.0f;
     float satWarmth = 0.0f;
+    int compType = 1;   // 0 Clean, 1 FET, 2 VCA, 3 Vari-Mu
     float exciter = 0.0f;
 
     float tuneAmount = 100.0f;
@@ -157,6 +158,16 @@ inline MixSettings decide(const Diagnosis& d)
         never went through anything.
     */
     settings.satWarmth = 25.0f + 30.0f * hollow + 20.0f * dull;
+
+    /*  Which gain element suits the take.
+
+        A wide range needs something that catches transients before they are
+        gone, which is what a FET does and a valve deliberately does not. A take
+        that is already controlled has nothing left to catch, so the slower
+        element earns its place instead: its programme-dependent release and
+        even harmonics are audible as character rather than as work being done.
+    */
+    settings.compType = dynamics > 0.55f ? 1 : 3;
     // Generating top only helps a take that lacks it; on a bright voice this
     // stays near zero and the Air shelf handles the rest.
     settings.exciter  = 60.0f * dull;

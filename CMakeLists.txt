@@ -122,6 +122,7 @@ target_sources(VOXERA PRIVATE
     Source/DSP/SoftClip.h
     Source/DSP/Character.h
     Source/DSP/NeuralStage.h
+    Source/DSP/ColourCompressor.h
     Source/DSP/AutoMix.h
     ${rubberband_SOURCE_DIR}/single/RubberBandSingle.cpp
 )

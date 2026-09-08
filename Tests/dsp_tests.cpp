@@ -9,6 +9,7 @@
 #include "../Source/DSP/VocalLock.h"
 #include "../Source/DSP/Chop.h"
 #include "../Source/DSP/Modulation.h"
+#include "../Source/DSP/ColourCompressor.h"
 #include <algorithm>
 #include <memory>
 #include "../Source/DSP/SoftClip.h"
@@ -844,6 +845,81 @@ void checkVocalLock()
     std::cout << "PASS: vocal lock follows the singer's register, ignores unvoiced, exact at zero\n";
 }
 
+void checkColourCompressor()
+{
+    constexpr double sr = 48000.0;
+    const int length = static_cast<int>(sr * 2.0);
+
+    struct Result { float reduction, harmonics, settle; };
+
+    const auto measure = [&](int type) {
+        voxera::ColourCompressor c;
+        c.prepare(sr, 2);
+        c.setType(type);
+        c.setThresholdDb(-24.0f); c.setRatio(6.0f);
+        c.setAttackMs(8.0f); c.setReleaseMs(120.0f);
+
+        juce::AudioBuffer<float> b(2, length);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < length; ++i) b.setSample(ch, i, sine(200.0, i, sr, 0.5f));
+        c.process(b);
+
+        const float fundamental = toneMagnitude(b, sr, 200.0);
+        const float second = toneMagnitude(b, sr, 400.0);
+        const float third = toneMagnitude(b, sr, 600.0);
+
+        // How far the gain has settled from where it started tells whether the
+        // release is programme dependent or a plain exponential.
+        float early = 0.0f, late = 0.0f;
+        for (int i = 4000; i < 5000; ++i) early = juce::jmax(early, std::abs(b.getSample(0, i)));
+        for (int i = length - 1000; i < length; ++i) late = juce::jmax(late, std::abs(b.getSample(0, i)));
+
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < length; ++i) CHECK(std::isfinite(b.getSample(ch, i)));
+
+        return Result { c.getReductionDb(),
+                        (second + third) / juce::jmax(1.0e-9f, fundamental),
+                        late / juce::jmax(1.0e-9f, early) };
+    };
+
+    const auto pure = measure(voxera::ColourCompressor::clean);
+    const auto fet = measure(voxera::ColourCompressor::fet);
+    const auto vca = measure(voxera::ColourCompressor::vca);
+    const auto tube = measure(voxera::ColourCompressor::variMu);
+
+    std::cout << "Compressor Clean:   " << pure.reduction << " dB GR, harmonics "
+              << (100.0f * pure.harmonics) << "%\n";
+    std::cout << "Compressor FET:     " << fet.reduction << " dB GR, harmonics "
+              << (100.0f * fet.harmonics) << "%\n";
+    std::cout << "Compressor VCA:     " << vca.reduction << " dB GR, harmonics "
+              << (100.0f * vca.harmonics) << "%\n";
+    std::cout << "Compressor Vari-Mu: " << tube.reduction << " dB GR, harmonics "
+              << (100.0f * tube.harmonics) << "%\n";
+
+    /*  Clean has to stay clean: it is the reference the others are heard
+        against, and a compressor that colours when set to Clean gives the user
+        nowhere to stand.
+    */
+    CHECK(pure.harmonics < 0.005f);
+
+    // Every coloured setting has to actually colour, or the choice is a label.
+    CHECK(fet.harmonics > pure.harmonics * 10.0f);
+    CHECK(tube.harmonics > pure.harmonics * 10.0f);
+    // A valve is the even-harmonic one; a FET mostly is not. They must not be
+    // the same voice wearing two names.
+    CHECK(std::abs(tube.harmonics - fet.harmonics) > 0.002f);
+
+    /*  Feedback designs converge on a reduction rather than being handed one,
+        so at the same threshold and ratio they hold back less than the
+        feedforward reference. That is the topology showing up in a number.
+    */
+    CHECK(fet.reduction < pure.reduction);
+    CHECK(tube.reduction < pure.reduction);
+    CHECK(vca.reduction > 0.5f);
+
+    std::cout << "PASS: compressor characters differ in colour and in how the loop settles\n";
+}
+
 void checkAutoMix()
 {
     using Profile = VoiceProfileEngine::Profile;
@@ -921,7 +997,8 @@ int main() {
     checkLimiter(); checkExciter(); checkPunch();
     checkGate(); checkSoftClip(); checkOptical(); checkCharacter();
     checkUpward(); checkWarmth(); checkDoubler(); checkVocalLock();
-    checkChopAndCrush(); checkModulationAndGlue(); checkAutoMix();
+    checkChopAndCrush(); checkModulationAndGlue();
+    checkColourCompressor(); checkAutoMix();
     for (double sr : {44100.0, 48000.0, 96000.0}) {
         for (float hz : {80.0f, 110.0f, 220.0f, 440.0f, 880.0f}) {
             YinPitchDetector yin; yin.prepare(sr);

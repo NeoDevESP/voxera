@@ -81,6 +81,7 @@ namespace ParamIDs
     static constexpr auto modMix = "modMix";
     static constexpr auto glue = "glue";
     static constexpr auto neuralMix = "neuralMix";
+    static constexpr auto compType = "compType";
 }
 
 VoxeraAudioProcessor::VoxeraAudioProcessor()
@@ -167,6 +168,7 @@ void VoxeraAudioProcessor::bindParameters()
     prm.modMix = bind(ParamIDs::modMix);
     prm.glue = bind(ParamIDs::glue);
     prm.neuralMix = bind(ParamIDs::neuralMix);
+    prm.compType = bind(ParamIDs::compType);
 }
 
 juce::File VoxeraAudioProcessor::neuralModelFolder()
@@ -364,7 +366,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxeraAudioProcessor::create
             number(ParamIDs::glue, "Glue", { 0.0f, 100.0f, 0.1f }, 0.0f)),
 
         group("neural", "Neural",
-            number(ParamIDs::neuralMix, "Neural Mix", { 0.0f, 100.0f, 0.1f }, 0.0f)));
+            number(ParamIDs::neuralMix, "Neural Mix", { 0.0f, 100.0f, 0.1f }, 0.0f)),
+
+        group("comptype", "Compressor Character",
+            choice(ParamIDs::compType, "Comp Character",
+                { "Clean", "FET", "VCA", "Vari-Mu" }, 1)));
 
     return layout;
 }
@@ -389,7 +395,7 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     spectralEngine.prepare(sampleRate, samplesPerBlock, getTotalNumOutputChannels());
     smartEQ.prepare(sampleRate, getTotalNumOutputChannels());
 
-    compressor.prepare(spec);
+    compressor.prepare(sampleRate, getTotalNumOutputChannels());
     compressor.reset();
 
     gate.prepare(sampleRate, getTotalNumOutputChannels());
@@ -717,14 +723,12 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
         compThreshold -= autoVoice * 4.0f * crestNeed;
     }
 
-    compressor.setThreshold(compThreshold);
+    compressor.setType(static_cast<int>(std::lround(prm.compType->load())));
+    compressor.setThresholdDb(compThreshold);
     compressor.setRatio(prm.compRatio->load());
-    compressor.setAttack(prm.compAttack->load());
-    compressor.setRelease(prm.compRelease->load());
-
-    juce::dsp::AudioBlock<float> block(buffer);
-    juce::dsp::ProcessContextReplacing<float> context(block);
-    compressor.process(context);
+    compressor.setAttackMs(prm.compAttack->load());
+    compressor.setReleaseMs(prm.compRelease->load());
+    compressor.process(buffer);
 
     // The slow half of the two-stage topology: the compressor above catches
     // individual peaks, this levels whole syllables and phrases. Splitting the
@@ -1001,6 +1005,7 @@ void VoxeraAudioProcessor::applyAutoMix()
     set(ParamIDs::satDrive, settings.satDrive);
     set(ParamIDs::satMix, settings.satMix);
     set(ParamIDs::satWarmth, settings.satWarmth);
+    set(ParamIDs::compType, static_cast<float>(settings.compType));
     set(ParamIDs::exciter, settings.exciter);
     set(ParamIDs::tuneAmount, settings.tuneAmount);
     set(ParamIDs::retune, settings.retune);
@@ -1025,7 +1030,7 @@ void VoxeraAudioProcessor::applyFactoryPreset(int index)
         a preset that leaves the density, optical and clip stages at zero is
         heard as the plugin sounding thin, whatever the rest is doing.
     */
-    static constexpr int numPresetValues = 16;
+    static constexpr int numPresetValues = 17;
     static constexpr const char* ids[numPresetValues] = {
         "tuneAmount", "retune", "humanize", "toneMacro", "airDb",
         "space", "satDrive", "satMix", "punch", "exciter",
@@ -1033,15 +1038,20 @@ void VoxeraAudioProcessor::applyFactoryPreset(int index)
         // Warmth belongs in every preset. Left out, the one stage that puts
         // even harmonics below 7 kHz never runs, and a chain that cannot
         // produce them cannot sound like a valve stage however it is set.
-        "satWarmth"
+        "satWarmth",
+        // And the gain element, for the same reason: leaving every preset on
+        // the arithmetic compressor would make the character choice something
+        // only a user who went looking would ever hear.
+        "compType"
     };
     static constexpr float values[numFactoryPresets][numPresetValues] = {
-        // tune retune human  tone  air space drive  mix punch excite optic dens clip smrtEQ lock warm
-        {   35,    30,   70,    0,   1,    8,    2,   8,   20,    15,   25,  35,   5,    20,   55,  20 }, // Clean
-        {   55,    40,   60,  -30,  -1,   14,    7,  30,   35,    10,   45,  45,  12,    30,   60,  70 }, // Warm
-        {  100,    75,   25,   10,   3,   18,    5,  20,   60,    50,   55,  65,  25,    40,   70,  45 }, // Modern
-        {   70,    45,   65,   20,   4,   65,    3,  15,   30,    40,   40,  50,  10,    25,   50,  40 }, // Dream
-        {   90,    85,   10,  -55,  -3,   10,   14,  60,   75,    35,   70,  80,  45,    35,   75,  60 }  // Radio
+        // Comp: 0 Clean, 1 FET, 2 VCA, 3 Vari-Mu.
+        // tune retune human  tone  air space drive  mix punch excite optic dens clip smrtEQ lock warm comp
+        {   35,    30,   70,    0,   1,    8,    2,   8,   20,    15,   25,  35,   5,    20,   55,  20,   2 }, // Clean
+        {   55,    40,   60,  -30,  -1,   14,    7,  30,   35,    10,   45,  45,  12,    30,   60,  70,   3 }, // Warm
+        {  100,    75,   25,   10,   3,   18,    5,  20,   60,    50,   55,  65,  25,    40,   70,  45,   1 }, // Modern
+        {   70,    45,   65,   20,   4,   65,    3,  15,   30,    40,   40,  50,  10,    25,   50,  40,   3 }, // Dream
+        {   90,    85,   10,  -55,  -3,   10,   14,  60,   75,    35,   70,  80,  45,    35,   75,  60,   1 }  // Radio
     };
     index = juce::jlimit(0, numFactoryPresets - 1, index);
     for (int i = 0; i < numPresetValues; ++i) set(ids[i], values[index][i]);

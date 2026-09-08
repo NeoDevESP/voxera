@@ -179,6 +179,15 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
                           "drops to under 5. Everything else keeps working; only the tuning "
                           "stops. Turn it off again to mix.");
     lowLatencyAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.apvts, "lowLatency", lowLatency);
+    motion.setClickingTogglesState(true);
+    motion.setToggleState(true, juce::dontSendNotification);
+    motion.setTooltip("Turn decorative animation on or off. Audio meters remain live.");
+    motion.onClick = [this] {
+        motion.setButtonText(motion.getToggleState() ? "MOTION ON" : "MOTION OFF");
+        animationTime = voiceMotion = 0.0f;
+        repaint();
+    };
+    addAndMakeVisible(motion);
     for (auto* b : {&analyze, &autoMix, &savePreset, &loadPreset, &loadModel, &bypass, &lowLatency})
         addAndMakeVisible(b);
     advancedEditor = std::make_unique<juce::GenericAudioProcessorEditor>(processor);
@@ -275,11 +284,25 @@ void VoxeraAudioProcessorEditor::resized()
     place(loadModel, 405, 484, 376, 32);
     place(bypass, 63, 644, 104, 54);
     place(lowLatency, 63, 706, 104, 34);
+    place(motion, 1000, 22, 130, 30);
     place(advancedViewport, 92, 337, 1012, 172);
     advancedEditor->setSize(advancedViewport.getWidth(), advancedViewport.getHeight());
 }
 void VoxeraAudioProcessorEditor::timerCallback()
 {
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    const float elapsed = lastAnimationTime > 0.0
+        ? static_cast<float>(juce::jlimit(0.0, 0.1, now - lastAnimationTime)) : 0.0f;
+    lastAnimationTime = now;
+    if (isShowing() && motion.getToggleState() && !bypass.getToggleState()) {
+        animationTime = std::fmod(animationTime + elapsed, 60.0f);
+        const float target = juce::jlimit(0.0f, 1.0f,
+            (processor.inputMeters.peakDb.load() + 48.0f) / 42.0f);
+        const float response = target > voiceMotion ? 0.08f : 0.24f;
+        voiceMotion += (target - voiceMotion) * (1.0f - std::exp(-elapsed / response));
+    } else {
+        animationTime = voiceMotion = 0.0f;
+    }
     inPeak = juce::jmax(processor.inputMeters.peakDb.load(), inPeak - 1.3f);
     outPeak = juce::jmax(processor.meters.peakDb.load(), outPeak - 1.3f);
     const bool running = processor.capturing.load();
@@ -451,12 +474,21 @@ void VoxeraAudioProcessorEditor::drawMascot(juce::Graphics& g, juce::Rectangle<f
 {
     juce::Graphics::ScopedSaveState state(g);
     g.addTransform(juce::AffineTransform::scale(r.getWidth() / 100.0f, r.getHeight() / 100.0f).translated(r.getX(), r.getY()));
+    g.addTransform(juce::AffineTransform::translation(0.0f, -voiceMotion * 4.0f));
     juce::Path horns; horns.startNewSubPath(19, 43); horns.quadraticTo(6, 30, 16, 10); horns.quadraticTo(19, 26, 34, 28);
     horns.lineTo(69, 28); horns.quadraticTo(87, 23, 89, 9); horns.quadraticTo(99, 31, 82, 43); horns.closeSubPath();
     g.setGradientFill(juce::ColourGradient(juce::Colour(0xffffa8df), 20, 15, juce::Colour(0xffae066b), 80, 85, false));
     g.fillPath(horns); g.fillEllipse(25, 55, 51, 40); g.fillEllipse(12, 27, 77, 56);
-    g.setColour(ink); g.fillEllipse(25, 46, 18, 23); g.fillEllipse(59, 46, 18, 23);
-    g.setColour(juce::Colours::white); g.fillEllipse(29, 48, 5, 6); g.fillEllipse(63, 48, 5, 6);
+    const float blinkPhase = std::fmod(animationTime, 5.0f);
+    const float eyeOpen = blinkPhase > 4.76f
+        ? juce::jmax(0.08f, std::abs(blinkPhase - 4.88f) / 0.12f) : 1.0f;
+    g.setColour(ink);
+    g.fillEllipse(25.0f, 57.5f - 11.5f * eyeOpen, 18.0f, 23.0f * eyeOpen);
+    g.fillEllipse(59.0f, 57.5f - 11.5f * eyeOpen, 18.0f, 23.0f * eyeOpen);
+    if (eyeOpen > 0.6f) {
+        g.setColour(juce::Colours::white);
+        g.fillEllipse(29, 48, 5, 6); g.fillEllipse(63, 48, 5, 6);
+    }
     juce::Path mouth; mouth.startNewSubPath(43, 71); mouth.quadraticTo(49, 78, 54, 71); mouth.quadraticTo(59, 77, 64, 70);
     g.setColour(ink); g.strokePath(mouth, juce::PathStrokeType(1.8f));
     g.setColour(pink); g.fillEllipse(25, 82, 21, 13); g.fillEllipse(57, 82, 21, 13);
@@ -475,7 +507,7 @@ void VoxeraAudioProcessorEditor::paint(juce::Graphics& g)
     }
     g.setColour(ink); g.setFont(font(10));
     g.drawText("V O C A L   P R O C E S S O R", 70, 28, 420, 22, juce::Justification::left);
-    g.drawText("S I N G   L O U D E R    +    S O U N D   P R E T T I E R", 640, 28, 480, 22, juce::Justification::right);
+    g.drawText("S I N G   L O U D E R    +    S O U N D   P R E T T I E R", 490, 28, 480, 22, juce::Justification::right);
     g.setColour(juce::Colour(0xff494548)); g.fillRoundedRectangle(43, 61, 1114, 478, 25);
     g.setColour(juce::Colour(0xffe7e4df)); g.drawRoundedRectangle(47, 65, 1106, 470, 23, 2);
     g.setGradientFill(juce::ColourGradient(juce::Colour(0xff230e20), 600, 180, juce::Colour(0xff08070b), 600, 520, false));
@@ -513,6 +545,19 @@ void VoxeraAudioProcessorEditor::paint(juce::Graphics& g)
     orbit.cubicTo(186, 310, 802, 283, 887, 170);
     g.setColour(pink.withAlpha(0.15f)); g.strokePath(orbit, juce::PathStrokeType(7.0f));
     g.setColour(pink.withAlpha(0.8f)); g.strokePath(orbit, juce::PathStrokeType(1.4f));
+    if (motion.getToggleState() && !bypass.getToggleState()) {
+        // Follow the existing cubic orbit; no extra timer or path allocation.
+        const float t = std::fmod(animationTime / 6.0f, 1.0f);
+        const float u = 1.0f - t;
+        const juce::Point<float> spark {
+            u*u*u*348.0f + 3.0f*u*u*t*186.0f + 3.0f*u*t*t*802.0f + t*t*t*887.0f,
+            u*u*u*257.0f + 3.0f*u*u*t*310.0f + 3.0f*u*t*t*283.0f + t*t*t*170.0f };
+        const float alpha = std::sin(t * juce::MathConstants<float>::pi);
+        g.setColour(pink.withAlpha(alpha * 0.18f));
+        g.fillEllipse(spark.x - 7.0f, spark.y - 7.0f, 14.0f, 14.0f);
+        g.setColour(juce::Colours::white.withAlpha(alpha * 0.9f));
+        g.fillEllipse(spark.x - 2.0f, spark.y - 2.0f, 4.0f, 4.0f);
+    }
     juce::Path star; star.startNewSubPath(911, 144); star.quadraticTo(914, 163, 928, 167);
     star.quadraticTo(914, 169, 911, 185); star.quadraticTo(908, 170, 894, 167);
     star.quadraticTo(908, 164, 911, 144); star.closeSubPath();

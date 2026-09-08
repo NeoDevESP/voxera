@@ -62,6 +62,7 @@ private:
     void applyNeuralModel(const juce::File&);
     juce::TextButton bypass { "BYPASS" };
     juce::TextButton lowLatency { "LOW LATENCY" };
+    juce::TextButton motion { "MOTION ON" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> lowLatencyAttachment;
     juce::Viewport advancedViewport;
@@ -69,6 +70,9 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
     int activePage = 0;
     float inPeak = -120.0f, outPeak = -120.0f;
+    // Presentation state belongs to the message thread, never the audio path.
+    double lastAnimationTime = 0.0;
+    float animationTime = 0.0f, voiceMotion = 0.0f;
 #if VOXERA_WITH_INSPECTOR
     // Opened with the I key. Holds a reference to this editor, so it has to be
     // declared last and destroyed first.
