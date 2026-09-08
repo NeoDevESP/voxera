@@ -251,6 +251,76 @@ int main(int argc, char** argv)
         CHECK(!n.hasNeuralModel());
     }
 
+    /*  Even harmonics out of the whole chain, with a factory preset loaded.
+
+        This is the measurement that answers whether the plugin sounds valve-like
+        rather than merely contains a stage that could. Everything upstream is
+        symmetric — tanh, the compressors, the filters — so a second harmonic in
+        the output can only have come from the biased shaper. If a preset leaves
+        that control at zero the chain is incapable of producing one, which is
+        exactly the state this plugin shipped in until now.
+    */
+    {
+        const auto secondHarmonic = [&](int preset) {
+            VoxeraAudioProcessor p;
+            p.applyFactoryPreset(preset);
+            for (const auto* id : { "pitchOn", "spatialOn", "gateOn", "spectralOn" })
+                set(p, id, 0.0f);
+            set(p, "smartEQAmount", 0.0f);
+            set(p, "exciter", 0.0f);      // its own even harmonics live above 7 kHz
+            set(p, "chopAmount", 0.0f);
+            set(p, "crush", 0.0f);
+            p.prepareToPlay(48000.0, 512);
+
+            const int total = 48000;
+            juce::AudioBuffer<float> acc(1, total);
+            int written = 0;
+            while (written < total) {
+                juce::AudioBuffer<float> b(2, 512);
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < 512; ++i) {
+                        const auto t = static_cast<float>(written + i) / 48000.0f;
+                        b.setSample(ch, i, 0.35f * std::sin(juce::MathConstants<float>::twoPi * 400.0f * t));
+                    }
+                p.processBlock(b, midi);
+                const int copy = juce::jmin(512, total - written);
+                acc.copyFrom(0, written, b, 0, 0, copy);
+                written += copy;
+            }
+
+            // Goertzel over the settled second half, so the smoothed controls
+            // have arrived and the compressors are no longer moving.
+            const auto tone = [&acc, total](double hz) {
+                const int start = total / 2, n = total - start;
+                const double w = juce::MathConstants<double>::twoPi * hz / 48000.0;
+                const double coeff = 2.0 * std::cos(w);
+                double s1 = 0.0, s2 = 0.0, windowSum = 0.0;
+                for (int i = 0; i < n; ++i) {
+                    const double hann = 0.5 - 0.5 * std::cos(juce::MathConstants<double>::twoPi * i / (n - 1));
+                    windowSum += hann;
+                    const double s0 = hann * acc.getSample(0, start + i) + coeff * s1 - s2;
+                    s2 = s1; s1 = s0;
+                }
+                const double re = s1 - s2 * std::cos(w), im = s2 * std::sin(w);
+                return 2.0 * std::sqrt(re * re + im * im) / juce::jmax(1.0, windowSum);
+            };
+            return std::make_pair(tone(800.0), tone(400.0));   // second, fundamental
+        };
+
+        static const char* names[] { "Clean", "Warm", "Modern", "Dream", "Radio" };
+        for (int preset = 0; preset < VoxeraAudioProcessor::numFactoryPresets; ++preset) {
+            const auto [second, fundamental] = secondHarmonic(preset);
+            const double ratio = second / juce::jmax(1.0e-9, fundamental);
+            std::cout << "ANALOGUE " << names[preset] << ": 2nd harmonic "
+                      << (100.0 * ratio) << "% of the fundamental\n";
+            CHECK(std::isfinite(second) && fundamental > 1.0e-4);
+            // A tenth of a percent is far below audibility; the point of the
+            // check is that it is not zero, which is what a missing control
+            // would give.
+            CHECK(ratio > 0.001);
+        }
+    }
+
     /*  Smart EQ inside the whole chain, not on its own.
 
         Its unit test passes, so if it seems to do nothing in use the cause is

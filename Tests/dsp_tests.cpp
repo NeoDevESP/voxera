@@ -869,6 +869,10 @@ void checkAutoMix()
         CHECK(s.gateThresholdDb >= -80.0f && s.gateThresholdDb <= -20.0f);
         CHECK(s.density >= 0.0f && s.density <= 100.0f);
         CHECK(s.vocalLock >= 0.0f && s.vocalLock <= 100.0f);
+        CHECK(s.satWarmth >= 0.0f && s.satWarmth <= 100.0f);
+        // Never zero: without it the chain cannot make an even harmonic below
+        // the exciter's band, whatever else it is doing.
+        CHECK(s.satWarmth > 10.0f);
     }
     CHECK(loose.density > neutral.density);
     CHECK(muddy.vocalLock > neutral.vocalLock);

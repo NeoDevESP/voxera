@@ -39,6 +39,7 @@ struct MixSettings
 
     float satDrive = 4.0f;
     float satMix = 15.0f;
+    float satWarmth = 0.0f;
     float exciter = 0.0f;
 
     float tuneAmount = 100.0f;
@@ -149,6 +150,13 @@ inline MixSettings decide(const Diagnosis& d)
 
     settings.satDrive = 3.0f + 5.0f * dynamics;
     settings.satMix   = 10.0f + 15.0f * dynamics;
+    /*  Even harmonics fill in a voice that reads as thin, which is what a
+        scooped middle or a missing top sounds like. Never zero: this is the
+        only stage in the chain that can produce them below the exciter's band,
+        and a take with none at all sounds like what it is — a recording that
+        never went through anything.
+    */
+    settings.satWarmth = 25.0f + 30.0f * hollow + 20.0f * dull;
     // Generating top only helps a take that lacks it; on a bright voice this
     // stays near zero and the Air shelf handles the rest.
     settings.exciter  = 60.0f * dull;
