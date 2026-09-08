@@ -42,10 +42,16 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 
 Write-Host "Buscando '$Query' en TONE3000..." -ForegroundColor Cyan
 
+# Armada por partes en lugar de en una expresion partida en dos lineas: dentro
+# de parentesis, un salto de linea ANTES del operador termina la expresion en
+# PowerShell, asi que el "+" tendria que ir al final de la linea anterior. Por
+# pasos se lee mejor y no depende de esa regla.
+$sizeFilter = ($Sizes | ForEach-Object { "&sizes=$_" }) -join ""
+$searchUri  = "$base/tones/search?query=$([uri]::EscapeDataString($Query))"
+$searchUri += "&format=nam&page=1&page_size=25$sizeFilter"
+
 try {
-    $search = Invoke-RestMethod -Headers $headers -Method Get `
-        -Uri ("$base/tones/search?query=$([uri]::EscapeDataString($Query))&format=nam&page=1&page_size=25"
-              + (($Sizes | ForEach-Object { "&sizes=$_" }) -join ""))
+    $search = Invoke-RestMethod -Headers $headers -Method Get -Uri $searchUri
 } catch {
     Write-Host "La busqueda ha fallado: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "Un 401 aqui significa que la clave no vale para esta API."
