@@ -87,6 +87,7 @@ int main(int argc, char** argv)
     bool autoMix = false;
     juce::String insert;
     bool listInsert = false;
+    juce::File compareWith;
     juce::StringPairArray insertSets;
     juce::StringPairArray overrides;
 
@@ -98,6 +99,8 @@ int main(int argc, char** argv)
         else if (argument == "--auto-mix") autoMix = true;
         else if (argument == "--insert" && i + 1 < argc) insert = argv[++i];
         else if (argument == "--insert-list") listInsert = true;
+        else if (argument == "--compare" && i + 1 < argc)
+            compareWith = juce::File::getCurrentWorkingDirectory().getChildFile(argv[++i]);
         else if (argument == "--insert-set" && i + 1 < argc) {
             const juce::String pair(argv[++i]);
             insertSets.set(pair.upToFirstOccurrenceOf("=", false, false),
@@ -113,6 +116,64 @@ int main(int argc, char** argv)
 
     juce::AudioFormatManager formats;
     formats.registerBasicFormats();
+
+    /*  Two finished files, side by side, with no processing in between.
+
+        "It sounds better" is not something anyone can act on. What can be acted
+        on is which band holds more energy, how much dynamic range each one
+        kept, and how loud they actually are — and those are three numbers that
+        turn an impression into somewhere to look.
+
+        Deliberately no attempt to align or time-stretch. Two renders of the
+        same take start at the same sample or they do not, and pretending
+        otherwise would produce confident numbers about the wrong thing.
+    */
+    if (compareWith != juce::File()) {
+        std::unique_ptr<juce::AudioFormatReader> a(formats.createReaderFor(input));
+        std::unique_ptr<juce::AudioFormatReader> b(formats.createReaderFor(compareWith));
+        if (a == nullptr || b == nullptr) { std::cerr << "could not read both files" << std::endl; return 1; }
+
+        const int shortest = static_cast<int>(juce::jmin(a->lengthInSamples, b->lengthInSamples));
+        const double rateA = a->sampleRate;
+
+        const auto study = [&](juce::AudioFormatReader& reader) {
+            juce::AudioBuffer<float> buffer(juce::jmax(1, static_cast<int>(reader.numChannels)), shortest);
+            reader.read(&buffer, 0, shortest, 0, true, buffer.getNumChannels() > 1);
+            Tilt tilt; tilt.prepare(reader.sampleRate);
+            double sum = 0.0; float peak = 0.0f; int count = 0;
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                for (int i = 0; i < shortest; ++i) {
+                    const float v = buffer.getSample(ch, i);
+                    tilt.add(v); sum += static_cast<double>(v) * v;
+                    peak = juce::jmax(peak, std::abs(v)); ++count;
+                }
+            const float rms = static_cast<float>(std::sqrt(sum / juce::jmax(1, count)));
+            return std::make_tuple(peak, rms, tilt);
+        };
+
+        const auto [peakA, rmsA, tiltA] = study(*a);
+        const auto [peakB, rmsB, tiltB] = study(*b);
+
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << std::endl << "A  " << input.getFileName() << std::endl
+                  << "B  " << compareWith.getFileName() << std::endl
+                  << "   comparing " << (shortest / rateA) << " s" << std::endl << std::endl;
+        std::cout << "  peak    A " << decibels(peakA) << "   B " << decibels(peakB)
+                  << "   difference " << (decibels(peakB) - decibels(peakA)) << " dB" << std::endl;
+        std::cout << "  rms     A " << decibels(rmsA) << "   B " << decibels(rmsB)
+                  << "   difference " << (decibels(rmsB) - decibels(rmsA)) << " dB" << std::endl;
+        // Crest is the one that says which is squashed harder, and level alone
+        // hides it completely.
+        std::cout << "  crest   A " << (decibels(peakA) - decibels(rmsA))
+                  << "   B " << (decibels(peakB) - decibels(rmsB))
+                  << "   difference " << ((decibels(peakB) - decibels(rmsB)) - (decibels(peakA) - decibels(rmsA)))
+                  << " dB" << std::endl << std::endl;
+        tiltA.report("A");
+        tiltB.report("B");
+        std::cout << std::endl;
+        return 0;
+    }
+
     std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(input));
     if (reader == nullptr) { std::cerr << "not a readable audio file\n"; return 1; }
 
