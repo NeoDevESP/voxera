@@ -86,6 +86,8 @@ int main(int argc, char** argv)
     juce::String preset;
     bool autoMix = false;
     juce::String insert;
+    bool listInsert = false;
+    juce::StringPairArray insertSets;
     juce::StringPairArray overrides;
 
     for (int i = 2; i < argc; ++i) {
@@ -95,6 +97,12 @@ int main(int argc, char** argv)
         else if (argument == "--preset" && i + 1 < argc) preset = argv[++i];
         else if (argument == "--auto-mix") autoMix = true;
         else if (argument == "--insert" && i + 1 < argc) insert = argv[++i];
+        else if (argument == "--insert-list") listInsert = true;
+        else if (argument == "--insert-set" && i + 1 < argc) {
+            const juce::String pair(argv[++i]);
+            insertSets.set(pair.upToFirstOccurrenceOf("=", false, false),
+                           pair.fromFirstOccurrenceOf("=", false, false));
+        }
         else if (argument == "--set" && i + 1 < argc) {
             const juce::String pair(argv[++i]);
             overrides.set(pair.upToFirstOccurrenceOf("=", false, false),
@@ -141,6 +149,31 @@ int main(int argc, char** argv)
         const auto loaded = processor.loadInsertPlugin(file);
         std::cout << "  insert: " << file.getFileName() << " -> " << loaded.message << std::endl;
         if (!loaded.ok) return 3;
+
+        /*  Its controls, listed by the names it gives them.
+
+            Printed rather than assumed. Nothing in the format tells a host
+            which knob on a compressor is the one that decides how hard it
+            works, so the only way to find out what this particular plugin
+            calls things is to ask it and read the answer.
+        */
+        if (listInsert) {
+            const auto names = processor.insertParameterNames();
+            std::cout << "  " << names.size() << " controls:" << std::endl;
+            for (int n = 0; n < names.size(); ++n)
+                std::cout << "    [" << n << "] " << names[n]
+                          << "  =  " << processor.insertParameterText(n) << std::endl;
+        }
+
+        // Set by name rather than by index, so a plugin update that reorders
+        // its list does not silently move a different knob.
+        for (const auto& key : insertSets.getAllKeys()) {
+            const int index = processor.findInsertParameter({ key });
+            if (index < 0) { std::cerr << "  no control matching: " << key << std::endl; continue; }
+            processor.setInsertParameter(index, insertSets[key].getFloatValue());
+            std::cout << "  set " << processor.insertParameterNames()[index]
+                      << " -> " << processor.insertParameterText(index) << std::endl;
+        }
     }
     if (autoMix) {
         processor.requestAutoMix();

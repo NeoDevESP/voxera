@@ -1314,7 +1314,38 @@ void VoxeraAudioProcessor::applyAutoMix()
     set(ParamIDs::compRatio, settings.compRatio);
     set(ParamIDs::compAttack, settings.compType == 1 ? 6.0f : 15.0f);
     set(ParamIDs::compRelease, settings.compType == 1 ? 120.0f : 200.0f);
-    set("compColour", 30.0f + 30.0f * diagnosis.dynamics);
+    set(ParamIDs::compColour, 30.0f + 30.0f * diagnosis.dynamics);
+
+    /*  And the plugin in the insert slot, if it has a control that admits to
+        deciding how hard it works.
+
+        The same judgement that drives our own compressor, applied to somebody
+        else's: a take with a wide crest wants more of it, a level one wants
+        less. What this does not do is pretend to know more than it does. If the
+        hosted plugin names nothing recognisable, nothing is moved, and the
+        report says so rather than leaving the user to wonder whether it did
+        anything.
+
+        Deliberately conservative in range. Driving a stranger's compressor to
+        either extreme from an eight-second listen is a good way to produce a
+        result nobody asked for, and the person can always take it further by
+        hand once they hear where it landed.
+    */
+    juce::String insertNote;
+    if (insertSlot.hasPlugin()) {
+        const int amount = insertSlot.findAmountControl();
+        if (amount >= 0) {
+            const float wanted = juce::jlimit(0.25f, 0.75f, 0.30f + 0.45f * diagnosis.dynamics);
+            insertSlot.setParameter(amount, wanted);
+            insertNote = " " + insertSlot.pluginName() + ": "
+                       + insertSlot.parameterNames()[amount] + " set to "
+                       + insertSlot.parameterText(amount) + ".";
+        } else {
+            insertNote = " " + insertSlot.pluginName()
+                       + " left alone: none of its controls name themselves as the one that"
+                         " sets how hard it compresses.";
+        }
+    }
     set(ParamIDs::optical, settings.optical);
     set(ParamIDs::density, settings.density);
     set(ParamIDs::punch, settings.punch);
@@ -1337,6 +1368,9 @@ void VoxeraAudioProcessor::applyAutoMix()
     set(ParamIDs::spectralOn, 1.0f);
     set(ParamIDs::limiterOn, 1.0f);
     set(ParamIDs::toneMacro, 0.0f);
+    // What was done to the hosted plugin belongs in the same report as
+    // everything else that was done, or it is a change nobody was told about.
+    if (insertNote.isNotEmpty()) lastReport += juce::newLine + juce::String("INSERT") + insertNote;
     lastReport += "\nAPPLIED at " + juce::String(intensity * 100.0f, 0) + "% (locked sections preserved):";
     for (const auto& [id, value] : autoMixAfter) lastReport += "\n   " + id + " " + juce::String(value, 1);
     autoMixHistoryValid.store(!autoMixBefore.empty());

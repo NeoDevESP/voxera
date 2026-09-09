@@ -151,6 +151,123 @@ public:
             current->setStateInformation(state.getData(), static_cast<int>(state.getSize()));
     }
 
+    /*  What the hosted plugin calls its own controls.
+
+        Message thread only. Reading a name is cheap but reading it inside the
+        callback would still be asking somebody else's code a question while
+        audio is waiting on the answer.
+    */
+    juce::StringArray parameterNames() const
+    {
+        juce::StringArray names;
+        if (current != nullptr)
+            for (auto* parameter : current->getParameters())
+                names.add(parameter->getName(64));
+        return names;
+    }
+
+    /*  The controls a person would recognise, with the boilerplate left out.
+
+        Asking a real plugin what it exposes is sobering: the LA-2A used to test
+        this reports two thousand and eighty-eight parameters, of which eight
+        are knobs and the rest are MIDI CC mappings it publishes because the
+        format lets it. Listing all of them is useless to a person and searching
+        all of them is worse than useless, because a keyword can match a CC slot
+        and then the wrong thing moves.
+    */
+    static bool isBoilerplate(const juce::String& name)
+    {
+        return name.startsWithIgnoreCase("MIDI CC") || name.containsIgnoreCase("Master Bypass");
+    }
+
+    juce::Array<int> realParameters() const
+    {
+        juce::Array<int> indices;
+        if (current == nullptr) return indices;
+        const auto& parameters = current->getParameters();
+        for (int i = 0; i < parameters.size(); ++i)
+            if (!isBoilerplate(parameters[i]->getName(64))) indices.add(i);
+        return indices;
+    }
+
+    /*  Finds the control that does a particular job, by what it is called.
+
+        This is a heuristic and is worth saying so plainly. There is no standard
+        that tells a host which knob on a compressor is the one that decides how
+        hard it works: the format hands over a list of names and nothing else.
+        Matching on words the industry actually uses gets the common cases —
+        an opto unit calls it Peak Reduction, most others call it Threshold —
+        and will simply fail to find anything on a plugin that names its
+        controls some other way.
+
+        Failing to find is the right failure. Guessing an index would move a
+        control that happens to sit in that position, and moving the wrong knob
+        confidently is worse than moving none.
+    */
+    int findParameter(const juce::StringArray& words) const
+    {
+        if (current == nullptr) return -1;
+        const auto& parameters = current->getParameters();
+
+        // Words in the order given, so the caller decides which naming it
+        // prefers, and the boilerplate skipped so a keyword cannot land on a
+        // MIDI mapping that happens to contain it.
+        for (const auto& word : words)
+            for (int i = 0; i < parameters.size(); ++i) {
+                const auto name = parameters[i]->getName(64);
+                if (!isBoilerplate(name) && name.containsIgnoreCase(word)) return i;
+            }
+        return -1;
+    }
+
+    // Normalised, because that is the only scale the format guarantees.
+    float getParameter(int index) const
+    {
+        if (current == nullptr) return 0.0f;
+        const auto& parameters = current->getParameters();
+        return juce::isPositiveAndBelow(index, parameters.size()) ? parameters[index]->getValue() : 0.0f;
+    }
+
+    juce::String parameterText(int index) const
+    {
+        if (current == nullptr) return {};
+        const auto& parameters = current->getParameters();
+        return juce::isPositiveAndBelow(index, parameters.size())
+             ? parameters[index]->getCurrentValueAsText() : juce::String();
+    }
+
+    /*  Moves one of its controls. Message thread only.
+
+        Announced to the plugin the way a host announces it, so the plugin
+        redraws and records the change rather than finding its own control
+        somewhere it did not put it.
+    */
+    void setParameter(int index, float normalised)
+    {
+        if (current == nullptr) return;
+        const auto& parameters = current->getParameters();
+        if (!juce::isPositiveAndBelow(index, parameters.size())) return;
+        parameters[index]->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, normalised));
+    }
+
+    /*  The control that decides how hard the hosted unit works.
+
+        Named differently by almost every design, and the list below is what
+        those names actually are rather than what they ought to be. An opto
+        compressor calls it Peak Reduction and abbreviates it — the LA-2A tested
+        here says "Peak Reduct" — while most others call it Threshold, and a few
+        call it Input because driving the input harder is how you drive them.
+
+        Ordered most specific first. "Input" is last precisely because it is the
+        vaguest: on a unit that has both, it is not the one that decides the
+        compression.
+    */
+    int findAmountControl() const
+    {
+        return findParameter({ "Peak Reduct", "Peak Reduction", "Threshold",
+                               "Compression", "Amount", "Input" });
+    }
+
     void process(juce::AudioBuffer<float>& buffer)
     {
         auto* hosted = active.load(std::memory_order_acquire);
