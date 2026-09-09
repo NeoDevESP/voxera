@@ -48,7 +48,7 @@ public:
         for (auto& f : filters) f.prepare(sr, numChannels);
 
         // Several seconds: this is the singer's character, not the phrase.
-        liveCoeff = 1.0f - std::exp(-1.0f / static_cast<float>(4.0 * 100.0));
+        liveCoeff = 0.0f; // updated for each fresh spectrum using elapsed samples
 
         amount.reset(sr, 0.100);
         amount.setCurrentAndTargetValue(0.0f);
@@ -63,26 +63,31 @@ public:
         liveSeen = false;
         capturing = false;
         captureFrames = 0;
+        captureReadings = 0;
         capture.fill(0.0f);
         amount.setCurrentAndTargetValue(amount.getTargetValue());
     }
 
     void setAmount(float normalised) { amount.setTargetValue(juce::jlimit(0.0f, 1.0f, normalised)); }
 
-    void useSpectrum(const float* magnitudes, int bins, double binHz, float scale)
+    void useSpectrum(const float* magnitudes, int bins, double binHz, float scale, uint32_t frame, int hopSamples)
     {
         spectrum = magnitudes;
         spectrumBins = bins;
         spectrumBinHz = binHz;
         spectrumScale = scale;
+        spectrumFrame = frame;
+        spectrumHop = hopSamples;
     }
 
     void startCapture(float seconds)
     {
         capture.fill(0.0f);
         captureFrames = 0;
-        // The analysis runs about a hundred times a second.
-        captureTarget = juce::jmax(1, static_cast<int>(seconds * 100.0f));
+        captureReadings = 0;
+        // Duration is measured in samples, independent of host block size.
+        captureTarget = juce::jmax(1, static_cast<int>(seconds * sr));
+        lastFrame = spectrumFrame;
         capturing = true;
     }
 
@@ -95,8 +100,8 @@ public:
 
     bool hasReference() const noexcept { return reference.ready; }
     const Reference& getReference() const noexcept { return reference; }
-    void setReference(const Reference& r) noexcept { reference = r; }
-    void clearReference() noexcept { reference = {}; }
+    void setReference(const Reference& r) noexcept { reference = r; capturing = false; applied.fill(0.0f); }
+    void clearReference() noexcept { setReference({}); }
 
     // How far the correction is currently reaching, for the editor to show.
     float appliedRangeDb() const noexcept { return rangeDb.load(std::memory_order_relaxed); }
@@ -128,7 +133,7 @@ public:
             // Moved gradually even though it is recomputed per block, so that a
             // reference loaded mid-phrase arrives as a fade and not a step.
             auto& current = applied[static_cast<size_t>(b)];
-            current += 0.05f * (target - current);
+            current += (1.0f - std::exp(-static_cast<float>(count / (sr * 0.2)))) * (target - current);
             filters[static_cast<size_t>(b)].setPeaking(bandHz(b), 1.1, current);
             widest = juce::jmax(widest, std::abs(current));
         }
@@ -158,6 +163,11 @@ private:
     void measure()
     {
         if (spectrum == nullptr || spectrumBins <= 8 || spectrumBinHz <= 0.0) return;
+        if (spectrumFrame == lastFrame) return;
+        const auto frames = spectrumFrame > lastFrame ? spectrumFrame - lastFrame : 1u;
+        lastFrame = spectrumFrame;
+        const int elapsed = static_cast<int>(juce::jmin(frames, 1024u)) * spectrumHop;
+        liveCoeff = 1.0f - std::exp(-static_cast<float>(elapsed / (4.0 * sr)));
 
         std::array<float, numBands> frame {};
         float mean = 0.0f;
@@ -194,10 +204,12 @@ private:
 
         if (capturing) {
             for (int b = 0; b < numBands; ++b) capture[static_cast<size_t>(b)] += frame[static_cast<size_t>(b)];
-            if (++captureFrames >= captureTarget) {
+            ++captureReadings;
+            captureFrames += elapsed;
+            if (captureFrames >= captureTarget) {
                 for (int b = 0; b < numBands; ++b)
                     reference.shapeDb[static_cast<size_t>(b)] =
-                        capture[static_cast<size_t>(b)] / static_cast<float>(captureFrames);
+                        capture[static_cast<size_t>(b)] / static_cast<float>(captureReadings);
                 reference.ready = true;
                 capturing = false;
             }
@@ -224,7 +236,9 @@ private:
     double sr = 48000.0, spectrumBinHz = 0.0;
     float spectrumScale = 1.0f, liveCoeff = 0.0f;
     int spectrumBins = 0, numChannels = 2;
-    int captureFrames = 0, captureTarget = 0;
+    uint32_t spectrumFrame = 0, lastFrame = 0;
+    int spectrumHop = 512;
+    int captureFrames = 0, captureTarget = 0, captureReadings = 0;
     bool capturing = false, liveSeen = false;
 };
 }

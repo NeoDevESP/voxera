@@ -43,7 +43,7 @@ public:
     void reset()
     {
         detector = 0.0f;
-        reduction = 0.0f;
+        reduction = 0.0f; memory = 0.0f;
         reductionDb.store(0.0f, std::memory_order_relaxed);
         amount.setCurrentAndTargetValue(amount.getTargetValue());
     }
@@ -57,6 +57,7 @@ public:
         const int channels = juce::jmin(numChannels, buffer.getNumChannels());
         if (channels <= 0 || buffer.getNumSamples() == 0) return;
 
+        const float memoryCoeff = 1.0f - std::exp(-1.0f / static_cast<float>(sr * 0.25));
         float deepest = 0.0f;
 
         for (int i = 0; i < buffer.getNumSamples(); ++i)
@@ -84,11 +85,12 @@ public:
                 target = slope * t * t * kneeDb;
             }
 
+            memory += memoryCoeff * (reduction - memory);
             if (target > reduction) {
                 reduction += attackCoeff * (target - reduction);
             } else {
                 // Deeper reduction releases more slowly: the optical behaviour.
-                const float depth = juce::jlimit(0.0f, 1.0f, reduction / 9.0f);
+                const float depth = juce::jlimit(0.0f, 1.0f, memory / 9.0f);
                 const float coeff = fastRelease + (slowRelease - fastRelease) * depth;
                 reduction += coeff * (target - reduction);
             }
@@ -116,9 +118,9 @@ public:
 
 private:
     static constexpr double detectorSeconds = 0.012;   // averages syllables, not peaks
-    static constexpr double attackSeconds = 0.015;
-    static constexpr double fastReleaseSeconds = 0.080;
-    static constexpr double slowReleaseSeconds = 0.700;
+    static constexpr double attackSeconds = 0.010;
+    static constexpr double fastReleaseSeconds = 0.060;
+    static constexpr double slowReleaseSeconds = 1.500;
     static constexpr float slope = 0.65f;              // about 3:1
     static constexpr float kneeDb = 6.0f;
     static constexpr float makeupDb = 5.0f;
@@ -127,7 +129,7 @@ private:
     std::atomic<float> reductionDb { 0.0f };
 
     double sr = 48000.0;
-    float detector = 0.0f, reduction = 0.0f;
+    float detector = 0.0f, reduction = 0.0f, memory = 0.0f;
     float detectorCoeff = 1.0f, attackCoeff = 1.0f, fastRelease = 1.0f, slowRelease = 1.0f;
     int numChannels = 2;
 };

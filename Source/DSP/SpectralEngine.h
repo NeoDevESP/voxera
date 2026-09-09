@@ -36,6 +36,8 @@ public:
         bypassBlend.setCurrentAndTargetValue(enabled ? 1.0f : 0.0f);
         toneBlend.reset(sr, 0.020);
         toneBlend.setCurrentAndTargetValue(enabled ? 1.0f : 0.0f);
+        deEssBlend.reset(sr, 0.020);
+        deEssBlend.setCurrentAndTargetValue(enabled ? 1.0f : 0.0f);
         numChannels = juce::jlimit(1, 2, channels);
         ring.fill(0.0f);
         fftData.fill(0.0f);
@@ -80,6 +82,7 @@ public:
         // Both halves, or the tone section keeps whatever fade position it was
         // left in and comes back at the wrong level after a transport stop.
         toneBlend.setCurrentAndTargetValue(enabled ? 1.0f : 0.0f);
+        deEssBlend.setCurrentAndTargetValue(enabled ? 1.0f : 0.0f);
         ring.fill(0.0f);
         fftData.fill(0.0f);
         spectrumDb.fill(-120.0f);
@@ -145,7 +148,6 @@ public:
                 const float dry = output;
                 float x = resonance1.processSample(ch, dry);
                 x = resonance2.processSample(ch, x);
-                x = deEsserFilter.processSample(ch, x);
                 output = dry + wet * (x - dry);
             }
         }
@@ -188,6 +190,38 @@ public:
                 x = presenceBell.processSample(ch, x);
                 x = airShelf.processSample(ch, x);
                 output = dry + wet * (x - dry);
+            }
+        }
+    }
+
+    /*  The de-esser, run last of all rather than with the other corrections.
+
+        Sibilance is not only what the singer produced. Saturation, an exciter
+        and a presence lift all make more of it, and every one of those sits
+        downstream of the corrective filters — so a de-esser placed with them
+        smooths the esses that arrived and then hands them to three stages that
+        put the harshness back. The literature is unambiguous about this: the
+        de-esser belongs at the end of the chain precisely so that it catches
+        what the rest of the chain added.
+
+        It stays part of this class because the sibilance measurement it follows
+        comes from the analysis above, and moving the filter somewhere else
+        would mean either duplicating that transform or wiring the score across
+        to a stage that has no other reason to know about it.
+    */
+    void processDeEss(juce::AudioBuffer<float>& buffer)
+    {
+        if (buffer.getNumSamples() == 0) return;
+        deEssBlend.setTargetValue(enabled ? 1.0f : 0.0f);
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const float wet = deEssBlend.getNextValue();
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            {
+                auto& output = buffer.getWritePointer(ch)[i];
+                const float dry = output;
+                output = dry + wet * (deEsserFilter.processSample(ch, dry) - dry);
             }
         }
     }
@@ -553,7 +587,7 @@ private:
              / static_cast<float>(fftSize);
     }
 
-    juce::SmoothedValue<float> bypassBlend, toneBlend;
+    juce::SmoothedValue<float> bypassBlend, toneBlend, deEssBlend;
     int controlInterval = 48, controlCountdown = 0;
     double sr = 48000.0;
     int numChannels = 2;

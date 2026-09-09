@@ -86,6 +86,18 @@ namespace ParamIDs
     static constexpr auto neuralMix = "neuralMix";
     static constexpr auto compType = "compType";
     static constexpr auto voiceMatch = "voiceMatch";
+    /*  Declared here like every other id rather than as a bare string at the
+        point of use, which is what these two were.
+
+        The convention is not decoration. An id written out twice — once to
+        create the parameter and once to bind it — has no compiler checking a
+        typo between the two, and it also hides the parameter from anything that
+        walks this namespace to audit coverage. Both of these were invisible to
+        the check that exists specifically to catch a control nothing reaches,
+        and one of them turned out to be exactly that.
+    */
+    static constexpr auto compColour = "compColour";
+    static constexpr auto levelMatch = "levelMatch";
 }
 
 VoxeraAudioProcessor::VoxeraAudioProcessor()
@@ -177,6 +189,8 @@ void VoxeraAudioProcessor::bindParameters()
     prm.neuralMix = bind(ParamIDs::neuralMix);
     prm.compType = bind(ParamIDs::compType);
     prm.voiceMatch = bind(ParamIDs::voiceMatch);
+    levelMatchParameter = bind(ParamIDs::levelMatch);
+    compColourParameter = bind(ParamIDs::compColour);
 }
 
 juce::File VoxeraAudioProcessor::neuralModelFolder()
@@ -389,10 +403,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxeraAudioProcessor::create
 
         group("comptype", "Compressor Character",
             choice(ParamIDs::compType, "Comp Character",
-                { "Clean", "FET", "VCA", "Vari-Mu" }, 1)),
+                { "Clean", "FET", "VCA", "Vari-Mu", "Opto" }, 1)),
 
         group("match", "Voice Match",
-            number(ParamIDs::voiceMatch, "Voice Match", { 0.0f, 100.0f, 0.1f }, 0.0f)));
+            number(ParamIDs::voiceMatch, "Voice Match", { 0.0f, 100.0f, 0.1f }, 0.0f)),
+        group("automixoptions", "Auto Mix Options",
+            number("autoMixIntensity", "Auto Mix Intensity", { 0.0f, 100.0f, 1.0f }, 100.0f),
+            toggle("autoMixLockPitch", "Keep Tuning", false),
+            toggle("autoMixLockEQ", "Keep EQ", false),
+            toggle("autoMixLockDynamics", "Keep Dynamics", false),
+            toggle("autoMixLockColour", "Keep Colour", false),
+            toggle(ParamIDs::levelMatch, "Level Match (RMS)", false)),
+        group("sauce", "Compressor Colour",
+            number(ParamIDs::compColour, "Comp Sauce", { 0.0f, 100.0f, 0.1f }, 50.0f)));
 
     return layout;
 }
@@ -447,6 +470,7 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     limiter.prepare(sampleRate, getTotalNumOutputChannels());
     limiter.setReleaseMs(80.0f);
 
+    levelMatch.prepare(sampleRate);
     inputGain.reset(sampleRate, 0.020);
     outputGain.reset(sampleRate, 0.020);
     inputGain.setCurrentAndTargetValue(1.0f);
@@ -608,16 +632,14 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
         else             buffer.clear(ch, 0, buffer.getNumSamples());
     }
 
+    voxera::VoiceMatch::Reference restoredReference;
+    if (pendingReference.tryRead(restoredReference, true)) voiceMatch.setReference(restoredReference);
     VoiceProfileEngine::Profile restored;
     if (pendingProfile.tryRead(restored, true)) {
         voiceProfile.restoreProfile(restored);
         profileNeedsPublish = false;
     }
-    for (int i = 0; i < buffer.getNumSamples(); ++i) {
-        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-            dryBuffer.getWritePointer(ch)[i] = dryDelay.process(ch, buffer.getReadPointer(ch)[i]);
-        dryDelay.advance();
-    }
+
 
     /*  A tracking-mode switch changes the reported latency, which only the
         message thread may tell the host about. Here the change is applied to the
@@ -639,6 +661,12 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
         dryDelay.setDelay(latency);
         latencyChangePending.store(true);
         triggerAsyncUpdate();
+    }
+
+    for (int i = 0; i < buffer.getNumSamples(); ++i) {
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            dryBuffer.getWritePointer(ch)[i] = dryDelay.process(ch, buffer.getReadPointer(ch)[i]);
+        dryDelay.advance();
     }
 
     const float inDb = prm.inputDb->load();
@@ -786,9 +814,14 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     voiceMatch.useSpectrum(spectralEngine.analysisMagnitudes(),
                            AdaptiveSpectralEngine::analysisBinCount,
                            spectralEngine.analysisBinHz(),
-                           spectralEngine.analysisScale());
+                           spectralEngine.analysisScale(), spectralEngine.analysisFrame(),
+                           AdaptiveSpectralEngine::hopSize);
     voiceMatch.setAmount(prm.voiceMatch->load() * 0.01f);
     voiceMatch.process(buffer);
+    publishedReference.tryPublish(voiceMatch.getReference());
+    referenceReady.store(voiceMatch.hasReference());
+    referenceCapturing.store(voiceMatch.isCapturing());
+    referenceCaptureProgress.store(voiceMatch.captureProgress());
 
     float compThreshold = prm.compThreshold->load();
 
@@ -800,6 +833,7 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
         compThreshold -= autoVoice * 4.0f * crestNeed;
     }
 
+    compressor.setColour(compColourParameter->load() * 0.01f);
     compressor.setType(static_cast<int>(std::lround(prm.compType->load())));
     compressor.setThresholdDb(compThreshold);
     compressor.setRatio(prm.compRatio->load());
@@ -864,6 +898,23 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     // that air into their tails.
     exciter.setAmount(prm.exciter->load() * 0.01f);
     exciter.process(buffer);
+
+    /*  De-essing last, after everything that makes sibilance worse.
+
+        The saturator, the neural stage, the exciter and the presence lift all
+        add high-frequency content, and all of them sit downstream of the
+        corrective filters this used to run with. Smoothing the esses before
+        them and then handing the result to three stages that put the harshness
+        back is work undone; both mixing references consulted for this say the
+        same thing, that the de-esser belongs at the end for exactly that
+        reason.
+
+        Ahead of the modulation and reverb rather than dead last, though. Those
+        are the stages that would otherwise be fed the harsh esses and spread
+        them over a reverb tail, which is the one place sibilance is hardest to
+        remove afterwards.
+    */
+    spectralEngine.processDeEss(buffer);
 
     double bpm = 120.0;
     // Negative means the host offered no musical position; the chop falls back
@@ -931,6 +982,7 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
 
     // Last in the chain: saturation, spatial feedback and output gain all sit
     // upstream, so this is the only point that can promise the ceiling holds.
+    levelMatch.process(buffer, dryBuffer, levelMatchParameter->load() > 0.5f);
     limiter.setEnabled(prm.limiterOn->load() > 0.5f);
     limiter.setCeilingDb(prm.limiterCeiling->load());
     limiter.process(buffer);
@@ -958,7 +1010,9 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     // Only once the profile is visible to the other thread is there anything
     // for the auto-mix to read.
     if (captureWasRunning && !voiceProfile.isCapturing() && autoMixRequested.load())
-        triggerAsyncUpdate();
+        autoMixComplete.store(true);
+    // Do not read a stale profile if the serialization thread briefly held its transfer.
+    if (autoMixComplete.load() && !profileNeedsPublish) triggerAsyncUpdate();
 }
 
 juce::AudioProcessorEditor* VoxeraAudioProcessor::createEditor()
@@ -986,10 +1040,13 @@ void VoxeraAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     saved.setProperty("brightness", profile.brightness, nullptr);
     saved.setProperty("confidence", profile.pitchConfidence, nullptr);
     saved.setProperty("range", profile.pitchRangeSemitones, nullptr);
+    saved.setProperty("usefulSeconds", profile.usefulSeconds, nullptr);
+    saved.setProperty("clippedFraction", profile.clippedFraction, nullptr);
     state.addChild(saved, -1, nullptr);
     // The path rather than the weights: a capture is someone's file on disk, and
     // copying it into every session that used it would be both wasteful and a
     // way of redistributing it without meaning to.
+    state.removeProperty("neuralModel", nullptr);
     if (loadedNeuralFile.existsAsFile())
         state.setProperty("neuralModel", loadedNeuralFile.getFullPathName(), nullptr);
 
@@ -997,11 +1054,11 @@ void VoxeraAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
         without it the Voice Match control would be a knob that does nothing
         every time a project is reopened — which is worse than not having it.
     */
-    if (voiceMatch.hasReference()) {
-        auto stored = state.getChildWithName("VoiceReference");
-        if (stored.isValid()) state.removeChild(stored, nullptr);
+    auto stored = state.getChildWithName("VoiceReference");
+    if (stored.isValid()) state.removeChild(stored, nullptr);
+    const auto reference = publishedReference.read();
+    if (reference.ready) {
         juce::ValueTree shape("VoiceReference");
-        const auto& reference = voiceMatch.getReference();
         for (int b = 0; b < voxera::VoiceMatch::numBands; ++b)
             shape.setProperty("b" + juce::String(b), reference.shapeDb[static_cast<size_t>(b)], nullptr);
         state.addChild(shape, -1, nullptr);
@@ -1014,6 +1071,7 @@ void VoxeraAudioProcessor::setStateInformation(const void* data, int sizeInBytes
 {
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
     if (xml != nullptr && xml->hasTagName(apvts.state.getType())) {
+        autoMixHistoryValid.store(false);
         auto state = juce::ValueTree::fromXml(*xml);
         const auto saved = state.getChildWithName("VoiceProfile");
         VoiceProfileEngine::Profile p;
@@ -1030,6 +1088,8 @@ void VoxeraAudioProcessor::setStateInformation(const void* data, int sizeInBytes
             p.brightness = number("brightness", 0.0f, 0.0f, 2.0f);
             p.pitchConfidence = number("confidence", 0.0f, 0.0f, 1.0f);
             p.pitchRangeSemitones = number("range", 0.0f, 0.0f, 96.0f);
+            p.usefulSeconds = number("usefulSeconds", 0.0f, 0.0f, 60.0f);
+            p.clippedFraction = number("clippedFraction", 0.0f, 0.0f, 1.0f);
             p.ready = static_cast<bool>(saved.getProperty("ready", false)) && p.avgRmsDb > -55.0f;
         }
         /*  A state written by an older build has no entry for parameters added
@@ -1054,6 +1114,7 @@ void VoxeraAudioProcessor::setStateInformation(const void* data, int sizeInBytes
         // Silently ignored when the file has moved or the session was written on
         // another machine: the mix control is restored either way, so the worst
         // case is a chain with that stage doing nothing rather than a failure.
+        voxera::VoiceMatch::Reference restoredReference;
         if (const auto shape = state.getChildWithName("VoiceReference"); shape.isValid()) {
             voxera::VoiceMatch::Reference reference;
             bool sane = true;
@@ -1066,11 +1127,17 @@ void VoxeraAudioProcessor::setStateInformation(const void* data, int sizeInBytes
                 reference.shapeDb[static_cast<size_t>(b)] = value;
             }
             reference.ready = sane;
-            if (sane) voiceMatch.setReference(reference);
+            if (sane) restoredReference = reference;
         }
 
+        pendingReference.publish(restoredReference);
+        publishedReference.publish(restoredReference);
+        referenceReady.store(restoredReference.ready);
+        referenceCapturing.store(false);
+        unloadNeuralModel();
         if (const auto path = state.getProperty("neuralModel").toString(); path.isNotEmpty()) {
-            if (const juce::File file(path); file.existsAsFile()) loadNeuralModel(file);
+            const auto result = loadNeuralModel(juce::File(path));
+            if (!result.ok) lastReport = "Neural model unavailable: " + path + ". Choose the file again in PRESETS.";
         }
 
         apvts.replaceState(state);
@@ -1100,20 +1167,43 @@ void VoxeraAudioProcessor::handleAsyncUpdate()
         setLatencySamples(activeLatencySamples.load());
         updateHostDisplay(ChangeDetails{}.withLatencyChanged(true));
     }
-    if (autoMixRequested.exchange(false)) applyAutoMix();
+    if (autoMixComplete.exchange(false) && autoMixRequested.exchange(false)) applyAutoMix();
 }
 
 void VoxeraAudioProcessor::applyAutoMix()
 {
     const auto profile = publishedProfile.read();
     const auto diagnosis = voxera::diagnose(profile);
-    lastReport = voxera::describe(diagnosis, voxera::decide(diagnosis));
+    lastReport = voxera::describe(diagnosis, voxera::decide(diagnosis)).replace("\nDID\n", "\nPROPOSED\n");
 
     // A capture that never heard a usable signal must not rewrite the chain.
-    if (!profile.ready) return;
+    if (!profile.ready) {
+        lastReport = "Capture not applied: " + juce::String(profile.usefulSeconds, 1)
+            + " s of usable signal. Sing at least 2 seconds above -55 dBFS and reduce input if clipping.";
+        return;
+    }
+    lastReport += " Usable signal: " + juce::String(profile.usefulSeconds, 1) + " s.";
 
     const auto settings = voxera::decide(diagnosis);
-    const auto set = [this](const char* id, float value) { setParameterNotifying(id, value); };
+    autoMixBefore.clear(); autoMixAfter.clear(); comparingBefore = false;
+    autoMixHistoryValid.store(false);
+    const float intensity = apvts.getRawParameterValue("autoMixIntensity")->load() * 0.01f;
+    const auto locked = [this](const char* id) { return apvts.getRawParameterValue(id)->load() > 0.5f; };
+    const auto set = [this, intensity, &locked](const char* id, float value) {
+        const juce::String name(id);
+        const bool pitch = name == "pitchOn" || name == "tuneAmount" || name == "retune" || name == "humanize";
+        const bool eq = name == "clean" || name == "bodyDb" || name == "presenceDb" || name == "airDb"
+            || name == "deEss" || name == "smartEQAmount" || name == "vocalLock" || name == "spectralOn" || name == "toneMacro";
+        const bool dynamics = (name.startsWith("comp") && name != "compType" && name != "compColour") || name.startsWith("gate") || name.startsWith("limiter")
+            || name == "optical" || name == "density" || name == "punch" || name == "clipAmount";
+        if (intensity <= 0.0f || (pitch && locked("autoMixLockPitch")) || (eq && locked("autoMixLockEQ"))
+            || (dynamics && locked("autoMixLockDynamics")) || (!pitch && !eq && !dynamics && locked("autoMixLockColour"))) return;
+        auto* parameter = apvts.getParameter(id);
+        const float before = parameter->convertFrom0to1(parameter->getValue());
+        const float after = parameter->isDiscrete() ? value : before + intensity * (value - before);
+        autoMixBefore.emplace_back(name, before); autoMixAfter.emplace_back(name, after);
+        setParameterNotifying(id, after);
+    };
 
     set(ParamIDs::clean, settings.clean);
     set(ParamIDs::bodyDb, settings.bodyDb);
@@ -1124,6 +1214,9 @@ void VoxeraAudioProcessor::applyAutoMix()
     set(ParamIDs::vocalLock, settings.vocalLock);
     set(ParamIDs::compThreshold, settings.compThreshold);
     set(ParamIDs::compRatio, settings.compRatio);
+    set(ParamIDs::compAttack, settings.compType == 1 ? 6.0f : 15.0f);
+    set(ParamIDs::compRelease, settings.compType == 1 ? 120.0f : 200.0f);
+    set("compColour", 30.0f + 30.0f * diagnosis.dynamics);
     set(ParamIDs::optical, settings.optical);
     set(ParamIDs::density, settings.density);
     set(ParamIDs::punch, settings.punch);
@@ -1146,19 +1239,46 @@ void VoxeraAudioProcessor::applyAutoMix()
     set(ParamIDs::spectralOn, 1.0f);
     set(ParamIDs::limiterOn, 1.0f);
     set(ParamIDs::toneMacro, 0.0f);
-    set(ParamIDs::globalMix, 100.0f);
+    lastReport += "\nAPPLIED at " + juce::String(intensity * 100.0f, 0) + "% (locked sections preserved):";
+    for (const auto& [id, value] : autoMixAfter) lastReport += "\n   " + id + " " + juce::String(value, 1);
+    autoMixHistoryValid.store(!autoMixBefore.empty());
+}
+
+void VoxeraAudioProcessor::compareAutoMix()
+{
+    if (!canUndoAutoMix()) return;
+    comparingBefore = !comparingBefore;
+    for (const auto& [id, value] : comparingBefore ? autoMixBefore : autoMixAfter)
+        setParameterNotifying(id.toRawUTF8(), value);
+}
+
+void VoxeraAudioProcessor::undoAutoMix()
+{
+    if (!canUndoAutoMix()) return;
+    for (const auto& [id, value] : autoMixBefore) setParameterNotifying(id.toRawUTF8(), value);
+    autoMixBefore.clear(); autoMixAfter.clear(); comparingBefore = false;
+    autoMixHistoryValid.store(false);
+    lastReport = "Auto Mix undone. Previous settings restored.";
 }
 
 void VoxeraAudioProcessor::applyFactoryPreset(int index)
 {
-    // Deliberately preserve key, scale, input/output gain and learned voice profile.
+    autoMixHistoryValid.store(false);
+    const juce::StringArray preserved { "pitchKey", "pitchScale", "pitchEngine", "inputDb", "outputDb",
+        "lowLatency", "bypass", "analyzeVoice", "levelMatch", "autoVoice", "voiceMatch" };
+    for (auto* p : getParameters()) {
+        auto* parameter = dynamic_cast<juce::RangedAudioParameter*>(p);
+        if (parameter == nullptr || preserved.contains(parameter->paramID) || parameter->paramID.startsWith("autoMix")) continue;
+        setParameterNotifying(parameter->paramID.toRawUTF8(), parameter->convertFrom0to1(parameter->getDefaultValue()));
+    }
+    // Preserve key, scale, engine, gains, tracking, analysis and reference context.
     const auto set = [this](const char* id, float value) { setParameterNotifying(id, value); };
     /*  Declaring both with the same extent makes a mismatched row a compile
         error. Every preset drives the whole chain rather than a corner of it:
         a preset that leaves the density, optical and clip stages at zero is
         heard as the plugin sounding thin, whatever the rest is doing.
     */
-    static constexpr int numPresetValues = 27;
+    static constexpr int numPresetValues = 28;
     static constexpr const char* ids[numPresetValues] = {
         "tuneAmount", "retune", "humanize", "toneMacro", "airDb",
         "space", "satDrive", "satMix", "punch", "exciter",
@@ -1198,7 +1318,16 @@ void VoxeraAudioProcessor::applyFactoryPreset(int index)
             threshold and ratio alone arrives at that. The style presets that
             want an aggressive element mostly want it blended.
         */
-        "compMix", "compSidechain"
+        "compMix", "compSidechain",
+
+        /*  How hard the gain element is pushed into its own character.
+
+            Left out of this table when it was added, which with the reset above
+            meant every preset drove it to its default and none of them ever
+            moved it — a colour control that could only be found by hand, in a
+            plugin whose presets exist to be the starting point.
+        */
+        "compColour"
     };
     /*  Comp: 0 Clean, 1 FET, 2 VCA, 3 Vari-Mu.  Tune mode: 0 Natural, 1 Modern, 2 Hard.
 
@@ -1223,20 +1352,29 @@ void VoxeraAudioProcessor::applyFactoryPreset(int index)
                    because it is meant to sit behind another vocal.
     */
     static constexpr float values[numFactoryPresets][numPresetValues] = {
-        // tune retune human  tone  air space drive  mix punch excite optic dens clip smrtEQ lock warm comp | mode form dbl width delay verb pres deEss | cmix schpf
-        {   35,    30,   70,    0,   1,    8,    2,   8,   20,    15,   25,  35,   5,    20,   55,  20,   2,     0,   0,  10,   50,    5,  40,   1,  55, 100,  60 }, // Clean
-        {   55,    40,   60,  -30,  -1,   14,    7,  30,   35,    10,   45,  45,  12,    30,   60,  70,   3,     1,   0,  20,   60,   10,  50,   0,  50,  85,  75 }, // Warm
-        {  100,    75,   25,   10,   3,   18,    5,  20,   60,    50,   55,  65,  25,    40,   70,  45,   1,     1,   0,  30,   70,   15,  45,   2,  60,  90,  95 }, // Modern
-        {   70,    45,   65,   20,   4,   65,    3,  15,   30,    40,   40,  50,  10,    25,   50,  40,   3,     1,   0,  45,   80,   30,  70,   1,  50,  80,  70 }, // Dream
-        {   90,    85,   10,  -55,  -3,   10,   14,  60,   75,    35,   70,  80,  45,    35,   75,  60,   1,     2,   0,  15,   55,    8,  35,   3,  65, 100, 110 }, // Radio
+        // tune retune human  tone  air space drive  mix punch excite optic dens clip smrtEQ lock warm comp | mode form dbl width delay verb pres deEss | cmix schpf colour
+        {   35,    30,   70,    0,   1,    8,    2,   8,   20,    15,   25,  35,   5,    20,   55,  20,   2,     0,   0,  10,   50,    5,  40,   1,  55, 100,  60, 15 }, // Clean
+        {   55,    40,   60,  -30,  -1,   14,    7,  30,   35,    10,   45,  45,  12,    30,   60,  70,   3,     1,   0,  20,   60,   10,  50,   0,  50,  85,  75, 60 }, // Warm
+        {  100,    75,   25,   10,   3,   18,    5,  20,   60,    50,   55,  65,  25,    40,   70,  45,   1,     1,   0,  30,   70,   15,  45,   2,  60,  90,  95, 45 }, // Modern
+        {   70,    45,   65,   20,   4,   65,    3,  15,   30,    40,   40,  50,  10,    25,   50,  40,   3,     1,   0,  45,   80,   30,  70,   1,  50,  80,  70, 50 }, // Dream
+        {   90,    85,   10,  -55,  -3,   10,   14,  60,   75,    35,   70,  80,  45,    35,   75,  60,   1,     2,   0,  15,   55,    8,  35,   3,  65, 100, 110, 70 }, // Radio
 
-        {  100,    98,    0,   40,   5,   12,   18,  70,   80,    65,   60,  75,  70,    30,   60,  35,   1,     2,   3,  35,   75,   15,  30,   4,  70,  75, 150 }, // Rage
-        {  100,    90,    5,  -10,   3,   55,   12,  55,   55,    45,   55,  60,  35,    35,   65,  55,   3,     2,  -2,  55,   85,   35,  75,   2,  60,  70, 120 }, // Astro
-        {   85,    60,   30,    0,   3,   45,    6,  30,   40,    40,   50,  55,  15,    35,   60,  60,   3,     1,   0,  40,   75,   28,  65,   2,  55,  85,  90 }, // Melodic
-        {   60,    70,   25,   15,   2,   10,   10,  40,   70,    40,   55,  60,  30,    40,   70,  40,   1,     1,   0,  15,   45,    8,  25,   3,  65,  65, 140 }, // Drill
-        {  100,    95,    0,   25,   5,   80,   14,  60,   45,    60,   45,  65,  45,    25,   50,  45,   1,     2,   5,  70,  100,   50,  85,   3,  60,  60, 130 }  // Ad-Lib
+        {  100,    98,    0,   40,   5,   12,   18,  70,   80,    65,   60,  75,  70,    30,   60,  35,   1,     2,   3,  35,   75,   15,  30,   4,  70,  75, 150, 80 }, // Rage
+        {  100,    90,    5,  -10,   3,   55,   12,  55,   55,    45,   55,  60,  35,    35,   65,  55,   3,     2,  -2,  55,   85,   35,  75,   2,  60,  70, 120, 70 }, // Astro
+        {   85,    60,   30,    0,   3,   45,    6,  30,   40,    40,   50,  55,  15,    35,   60,  60,   3,     1,   0,  40,   75,   28,  65,   2,  55,  85,  90, 55 }, // Melodic
+        {   60,    70,   25,   15,   2,   10,   10,  40,   70,    40,   55,  60,  30,    40,   70,  40,   1,     1,   0,  15,   45,    8,  25,   3,  65,  65, 140, 65 }, // Drill
+        {  100,    95,    0,   25,   5,   80,   14,  60,   45,    60,   45,  65,  45,    25,   50,  45,   1,     2,   5,  70,  100,   50,  85,   3,  60,  60, 130, 75 }  // Ad-Lib
     };
     index = juce::jlimit(0, numFactoryPresets - 1, index);
+    static constexpr float compSettings[numFactoryPresets][5] = {
+        // threshold, ratio, attack control, release control, sauce
+        {-18, 2.5f, 15, 140, 20}, {-20, 3, 12, 180, 65}, {-22, 4, 6, 110, 55},
+        {-18, 2.5f, 20, 220, 40}, {-24, 6, 4, 90, 75}, {-26, 8, 2, 100, 90},
+        {-22, 4, 16, 200, 75}, {-20, 3, 12, 180, 45}, {-24, 5, 5, 100, 60},
+        {-24, 6, 3, 140, 80}
+    };
+    const char* compIds[] { "compThreshold", "compRatio", "compAttack", "compRelease", "compColour" };
+    for (int c = 0; c < 5; ++c) set(compIds[c], compSettings[index][c]);
     for (int i = 0; i < numPresetValues; ++i) set(ids[i], values[index][i]);
     // The gate belongs on for all of them: everything above works by raising
     // quiet material, and room tone is quiet material.

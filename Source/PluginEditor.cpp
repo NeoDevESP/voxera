@@ -133,6 +133,13 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
     addControl("modDepth", "MOD DEPTH", 5);
     addControl("modMix", "MOD MIX", 5);
     addControl("glue", "GLUE", 5);
+    addControl("compColour", "COMP SAUCE", 2);
+    compressorChoice.combo.addItemList(dynamic_cast<juce::AudioParameterChoice*>(processor.apvts.getParameter("compType"))->choices, 1);
+    compressorChoice.combo.setName("Compressor character");
+    compressorChoice.label.setText("COMPRESSOR", juce::dontSendNotification);
+    compressorChoice.label.setColour(juce::Label::textColourId, pink);
+    addAndMakeVisible(compressorChoice.combo); addAndMakeVisible(compressorChoice.label);
+    compressorChoice.attachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(processor.apvts, "compType", compressorChoice.combo);
     const char* tabNames[] = {"VOCALS", "FX", "PRESETS", "MORE", "SMART EQ", "CHOP"};
     for (int i = 0; i < 6; ++i) {
         auto& tab = tabs[static_cast<size_t>(i)];
@@ -167,6 +174,15 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
     analyze.onClick = [this] { processor.requestVoiceCapture(); };
     analyze.setTooltip("Sing a representative phrase for 8 seconds while audio is running.");
     autoMix.onClick = [this] { processor.requestAutoMix(); };
+    compareMix.onClick = [this] { processor.compareAutoMix(); };
+    undoMix.onClick = [this] { processor.undoAutoMix(); };
+    mixOptions.onClick = [this] { showMixOptions(); };
+    matchLevel.setClickingTogglesState(true);
+    matchAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.apvts, "levelMatch", matchLevel);
+    compareMix.setTooltip("Switch between settings before and after the last Auto Mix. Enable MATCH LEVEL for RMS comparison; allow a few seconds to settle.");
+    undoMix.setTooltip("Restore every setting changed by the last Auto Mix in one click.");
+    mixOptions.setTooltip("Choose intensity and keep your tuning, EQ, dynamics or colour unchanged.");
+    matchLevel.setTooltip("Match processed RMS to the delayed input, with up to 36 dB attenuation or 9 dB boost. The limiter remains downstream. This is a comparison aid, not a LUFS measurement.");
     autoMix.setTooltip("Listens for 8 seconds, then sets EQ, de-ess, dynamics, punch, "
                        "exciter and tuning from what it heard. Every control stays editable "
                        "afterwards, and the move can be undone.");
@@ -183,8 +199,8 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
     loadModel.onClick = [this] { chooseNeuralModel(); };
     loadModel.setTooltip("Loads a Neural Amp Modeler capture (.nam) or an RTNeural model (.json) "
                          "and runs it where a preamp would sit. Captures of microphone preamps and "
-                         "console channels are what suit a voice. LSTM captures only: the WaveNet "
-                         "ones cost more CPU than this entire plugin. Nothing is bundled, so the "
+                         "console channels are what suit a voice. NAM LSTM and WaveNet up to 12 channels "
+                         "are supported. Nothing is bundled, so the "
                          "capture is yours to provide or to make.");
     bypass.setClickingTogglesState(true);
     bypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.apvts, "bypass", bypass);
@@ -203,7 +219,7 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
         repaint();
     };
     addAndMakeVisible(motion);
-    for (auto* b : {&analyze, &autoMix, &learnVoice, &savePreset, &loadPreset, &loadModel,
+    for (auto* b : {&compareMix, &undoMix, &mixOptions, &matchLevel, &analyze, &autoMix, &learnVoice, &savePreset, &loadPreset, &loadModel,
                     &bypass, &lowLatency})
         addAndMakeVisible(b);
     advancedEditor = std::make_unique<juce::GenericAudioProcessorEditor>(processor);
@@ -233,9 +249,12 @@ void VoxeraAudioProcessorEditor::selectPage(int page)
     }
     for (auto& b : presets) b.setVisible(page == 2);
     analyze.setVisible(page == 0); autoMix.setVisible(page == 0);
+    compareMix.setVisible(page == 0); undoMix.setVisible(page == 0);
+    mixOptions.setVisible(page == 0); matchLevel.setVisible(page == 0);
     learnVoice.setVisible(page == 0);
     savePreset.setVisible(page == 2); loadPreset.setVisible(page == 2);
     loadModel.setVisible(page == 2);
+    compressorChoice.combo.setVisible(page == 2); compressorChoice.label.setVisible(page == 2);
     advancedViewport.setVisible(page == 3);
     for (int i = 0; i < 6; ++i) tabs[static_cast<size_t>(i)].setToggleState(i == page, juce::dontSendNotification);
     resized(); repaint();
@@ -294,6 +313,8 @@ void VoxeraAudioProcessorEditor::resized()
     place(analyze, 98, 430, 190, 26);
     place(autoMix, 98, 459, 190, 26);
     place(learnVoice, 98, 488, 190, 26);
+    place(compareMix, 310, 430, 130, 26); place(undoMix, 448, 430, 130, 26);
+    place(mixOptions, 310, 462, 130, 26); place(matchLevel, 448, 462, 130, 26);
     for (int i = 0; i < 6; ++i) {
         auto& c = *controls[static_cast<size_t>(8 + i)];
         place(c.label, 115 + i * 157, 350, 120, 22);
@@ -306,6 +327,10 @@ void VoxeraAudioProcessorEditor::resized()
         place(presets[static_cast<size_t>(i)], 110 + i * 98, 374, 92, 40);
     place(savePreset, 405, 440, 178, 34); place(loadPreset, 603, 440, 178, 34);
     place(loadModel, 405, 484, 376, 32);
+    place(compressorChoice.label, 110, 438, 220, 20);
+    place(compressorChoice.combo, 110, 466, 230, 32);
+    place(controls[24]->label, 845, 424, 160, 22);
+    place(controls[24]->slider, 845, 448, 160, 68);
     place(bypass, 63, 644, 104, 54);
     place(lowLatency, 63, 706, 104, 34);
     place(motion, 1000, 22, 130, 30);
@@ -331,6 +356,11 @@ void VoxeraAudioProcessorEditor::timerCallback()
     outPeak = juce::jmax(processor.meters.peakDb.load(), outPeak - 1.3f);
     const bool running = processor.capturing.load();
     analyze.setEnabled(!running);
+    autoMix.setEnabled(!running && !processor.isAutoMixPending());
+    compareMix.setEnabled(processor.canUndoAutoMix() && !running);
+    undoMix.setEnabled(processor.canUndoAutoMix() && !running);
+    compareMix.setButtonText(processor.isComparingBefore() ? "A/B: BEFORE" : "A/B: AFTER");
+    loadModel.setButtonText(processor.hasNeuralModel() ? processor.neuralModelName().toUpperCase() : "LOAD NEURAL MODEL");
 
     // The button says what it will do next, so there is no separate indicator
     // to read for whether a reference exists.
@@ -407,7 +437,11 @@ void VoxeraAudioProcessorEditor::chooseNeuralModel()
     }
 
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(loadModel),
-        [this, models](int choice) {
+        [safe = juce::Component::SafePointer<VoxeraAudioProcessorEditor>(this), models](int choice) {
+            if (safe == nullptr) return;
+            auto& processor = safe->processor;
+            auto& loadModel = safe->loadModel;
+            auto& chooser = safe->chooser;
             if (choice == 0) return;
 
             if (choice == -2) {
@@ -425,13 +459,34 @@ void VoxeraAudioProcessorEditor::chooseNeuralModel()
                     VoxeraAudioProcessor::neuralModelFolder(), "*.nam;*.json");
                 chooser->launchAsync(juce::FileBrowserComponent::openMode
                                      | juce::FileBrowserComponent::canSelectFiles,
-                    [this](const juce::FileChooser& fc) {
-                        if (fc.getResult() != juce::File{}) applyNeuralModel(fc.getResult());
+                    [safe](const juce::FileChooser& fc) {
+                        if (safe != nullptr && fc.getResult() != juce::File{}) safe->applyNeuralModel(fc.getResult());
                     });
                 return;
             }
             if (juce::isPositiveAndBelow(choice - 1, models.size()))
-                applyNeuralModel(models[choice - 1]);
+                safe->applyNeuralModel(models[choice - 1]);
+        });
+}
+
+void VoxeraAudioProcessorEditor::showMixOptions()
+{
+    juce::PopupMenu menu;
+    const int amount = static_cast<int>(processor.apvts.getRawParameterValue("autoMixIntensity")->load());
+    menu.addSectionHeader("Auto Mix intensity");
+    for (int value : {25, 50, 75, 100}) menu.addItem(value, juce::String(value) + "%", true, amount == value);
+    menu.addSeparator();
+    const char* ids[] { "autoMixLockPitch", "autoMixLockEQ", "autoMixLockDynamics", "autoMixLockColour" };
+    const char* names[] { "Keep my tuning", "Keep my EQ", "Keep my dynamics", "Keep my colour" };
+    for (int i = 0; i < 4; ++i) menu.addItem(201 + i, names[i], true, processor.apvts.getRawParameterValue(ids[i])->load() > 0.5f);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(mixOptions),
+        [safe = juce::Component::SafePointer<VoxeraAudioProcessorEditor>(this)](int choice) {
+            if (safe == nullptr || choice == 0) return;
+            const char* lockIds[] { "autoMixLockPitch", "autoMixLockEQ", "autoMixLockDynamics", "autoMixLockColour" };
+            const char* id = choice <= 100 ? "autoMixIntensity" : lockIds[juce::jlimit(0, 3, choice - 201)];
+            auto* p = safe->processor.apvts.getParameter(id);
+            const float value = choice <= 100 ? static_cast<float>(choice) : (p->getValue() > 0.5f ? 0.0f : 1.0f);
+            p->beginChangeGesture(); p->setValueNotifyingHost(p->convertTo0to1(value)); p->endChangeGesture();
         });
 }
 
@@ -629,7 +684,8 @@ void VoxeraAudioProcessorEditor::paint(juce::Graphics& g)
     }
     if (activePage == 0) {
         g.setColour(pink.withAlpha(0.8f)); g.setFont(font(11));
-        g.drawText(processor.profileReady.load() ? "PROFILE READY" : "Sing for 8s, then raise Auto Voice", 308, 445, 290, 28, juce::Justification::left);
+        if (processor.autoMixReport().isEmpty())
+            g.drawText(processor.profileReady.load() ? "PROFILE READY" : "Sing for 8s, then raise Auto Voice", 310, 494, 290, 20, juce::Justification::left);
 
         /*  Auto Mix moves twenty controls at once. Saying what it concluded, in
             the same words a mixer would use, is what lets the singer disagree

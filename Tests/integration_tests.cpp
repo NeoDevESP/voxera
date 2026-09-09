@@ -629,23 +629,52 @@ int main(int argc, char** argv)
         is either dead or pointless, and both are worth failing over.
     */
     {
-        static constexpr const char* watched[] = {
-            "tuneAmount", "retune", "humanize", "toneMacro", "airDb",
-            "space", "satDrive", "satMix", "punch", "exciter",
-            "optical", "density", "clipAmount", "smartEQAmount", "vocalLock",
-            "satWarmth", "compType", "pitchMode", "formant", "doubler",
-            "width", "delayMix", "reverbBody", "presenceDb", "deEss",
-            "compMix", "compSidechain"
+        /*  Every parameter is walked, not a list kept by hand.
+
+            The hand-kept version of this test is the reason it had to be
+            rewritten: a colour control was added to the compressor, nobody put
+            it in the preset table, and the check that exists to catch exactly
+            that could not see it because its name had never been added to the
+            watch list either. A guard whose coverage is maintained by the same
+            person who forgets is not a guard.
+
+            So the rule is now inverted. Every parameter must either move across
+            the presets or appear below with a reason, and adding a parameter
+            forces that decision instead of silently defaulting to no coverage.
+        */
+        static const juce::StringArray deliberatelyFixed {
+            // Preserved across a preset load by design: they describe the song
+            // or the session, not the sound.
+            "pitchKey", "pitchScale", "pitchEngine", "inputDb", "outputDb", "globalMix",
+            // Operator controls rather than settings.
+            "bypass", "lowLatency", "analyzeVoice", "levelMatch", "autoVoice", "voiceMatch",
+            // Every preset turns these on, so they are covered but do not vary.
+            "pitchOn", "spectralOn", "spatialOn", "gateOn", "limiterOn",
+            // Depends on which capture the user loaded, if any.
+            "neuralMix",
+            // Fine adjustment underneath a macro that the presets do drive.
+            "compThreshold", "compRatio", "compAttack", "compRelease",
+            "smartEQRange", "smartEQResponse", "gateThreshold", "limiterCeiling",
+            "targetDb", "autoGain", "bodyDb", "clean", "reverbAir", "duck",
+            "delayFeedback", "character",
+            // Musical divisions and shapes: a preset picking one for everybody
+            // would be a worse default than leaving it where the user put it.
+            "delayDivision", "chopDivision", "chopPattern", "modType",
+            // The rhythmic and destructive effects, off unless asked for.
+            "chopAmount", "crush", "crushMix", "modRate", "modDepth", "modMix", "glue"
         };
-        constexpr int watchedCount = static_cast<int>(std::size(watched));
 
         VoxeraAudioProcessor p;
-        std::vector<std::vector<float>> seen;
+        juce::StringArray ids;
+        for (auto* raw : p.getParameters())
+            if (auto* parameter = dynamic_cast<juce::RangedAudioParameter*>(raw))
+                if (!parameter->paramID.startsWith("autoMix")) ids.add(parameter->paramID);
 
+        std::vector<std::vector<float>> seen;
         for (int preset = 0; preset < VoxeraAudioProcessor::numFactoryPresets; ++preset) {
             p.applyFactoryPreset(preset);
             std::vector<float> row;
-            for (const auto* id : watched) {
+            for (const auto& id : ids) {
                 auto* parameter = p.apvts.getParameter(id);
                 CHECK(parameter);
                 row.push_back(parameter->convertFrom0to1(parameter->getValue()));
@@ -653,32 +682,34 @@ int main(int argc, char** argv)
             seen.push_back(row);
         }
 
-        // No column may sit still across the whole set.
-        for (int column = 0; column < watchedCount; ++column) {
-            float lowest = seen[0][static_cast<size_t>(column)];
-            float highest = lowest;
+        juce::StringArray unreached;
+        for (int column = 0; column < ids.size(); ++column) {
+            float lowest = seen[0][static_cast<size_t>(column)], highest = lowest;
             for (const auto& row : seen) {
                 lowest = juce::jmin(lowest, row[static_cast<size_t>(column)]);
                 highest = juce::jmax(highest, row[static_cast<size_t>(column)]);
             }
-            if (highest - lowest < 1.0e-4f)
-                std::cout << "PRESET column never varies: " << watched[column] << "\n";
-            CHECK(highest - lowest > 1.0e-4f);
+            if (highest - lowest < 1.0e-4f && !deliberatelyFixed.contains(ids[column]))
+                unreached.add(ids[column]);
         }
+
+        if (!unreached.isEmpty()) {
+            std::cout << "PRESET controls no preset ever moves: " << unreached.joinIntoString(", ") << std::endl;
+            std::cout << "  Put them in the preset table, or list them as deliberately fixed." << std::endl;
+        }
+        CHECK(unreached.isEmpty());
 
         // And no two presets may land on the same settings.
         for (size_t a = 0; a + 1 < seen.size(); ++a)
             for (size_t b = a + 1; b < seen.size(); ++b)
                 CHECK(seen[a] != seen[b]);
 
-        // The style presets are built around the tuner gripping hard; if that
-        // stopped reaching them they would be indistinguishable from the rest.
-        VoxeraAudioProcessor namer2;
+        const int mode = ids.indexOf("pitchMode");
+        CHECK(mode >= 0);
         int hardTuned = 0;
-        for (size_t i = 0; i < seen.size(); ++i)
-            if (seen[i][17] > 1.5f) ++hardTuned;   // pitchMode: 2 is Hard
-        std::cout << "PRESETS: " << VoxeraAudioProcessor::numFactoryPresets
-                  << " total, " << hardTuned << " hard-tuned, all distinct\n";
+        for (const auto& row : seen) if (row[static_cast<size_t>(mode)] > 1.5f) ++hardTuned;
+        std::cout << "PRESETS: " << VoxeraAudioProcessor::numFactoryPresets << " total, "
+                  << ids.size() << " parameters walked, " << hardTuned << " hard-tuned, all distinct" << std::endl;
         CHECK(hardTuned >= 3);
     }
 

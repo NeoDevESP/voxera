@@ -10,6 +10,8 @@
 #include "DSP/SpatialEngine.h"
 #include "DSP/VoiceProfileEngine.h"
 #include "DSP/ProfileTransfer.h"
+#include "DSP/ValueTransfer.h"
+#include "DSP/LevelMatch.h"
 #include "DSP/Limiter.h"
 #include "DSP/Punch.h"
 #include "DSP/Exciter.h"
@@ -51,7 +53,7 @@ public:
     // Missed on the first two of those and caught by re-reading this comment,
     // which is the whole reason it is written as an instruction rather than as
     // a description.
-    static constexpr int stateVersion = 5;
+    static constexpr int stateVersion = 6;
 
     VoxeraAudioProcessor();
     // Cancels here rather than relying on the base destructor: by the time
@@ -76,17 +78,21 @@ public:
         the controls away.
     */
     void requestAutoMix() noexcept { autoMixRequested.store(true); captureRequested.store(true); }
+    bool canUndoAutoMix() const { return autoMixHistoryValid.load(); }
+    bool isComparingBefore() const { return canUndoAutoMix() && comparingBefore; }
+    void compareAutoMix();
+    void undoAutoMix();
 
     /*  Learns the spectral shape of the take now playing, so later takes can be
         matched to it. Voice conversion where the target is the singer's own
         best day rather than somebody else's voice.
     */
     void requestVoiceReference() noexcept { referenceRequested.store(true); }
-    bool isLearningReference() const noexcept { return voiceMatch.isCapturing(); }
-    float referenceProgress() const noexcept { return voiceMatch.captureProgress(); }
-    bool hasVoiceReference() const noexcept { return voiceMatch.hasReference(); }
+    bool isLearningReference() const noexcept { return referenceCapturing.load(); }
+    float referenceProgress() const noexcept { return referenceCaptureProgress.load(); }
+    bool hasVoiceReference() const noexcept { return referenceReady.load(); }
     float voiceMatchRangeDb() const noexcept { return voiceMatch.appliedRangeDb(); }
-    void clearVoiceReference() noexcept { voiceMatch.clearReference(); }
+    void clearVoiceReference() { pendingReference.publish({}); publishedReference.publish({}); referenceReady.store(false); }
     bool isAutoMixPending() const noexcept { return autoMixRequested.load(); }
 
     void applyFactoryPreset(int index);
@@ -281,6 +287,9 @@ private:
     void handleAsyncUpdate() override;
 
     ProfileTransfer publishedProfile, pendingProfile;
+    ValueTransfer<voxera::VoiceMatch::Reference> publishedReference, pendingReference;
+    std::atomic<bool> referenceCapturing { false }, referenceReady { false };
+    std::atomic<float> referenceCaptureProgress { 0.0f };
     std::atomic<bool> captureRequested { false };
     std::atomic<bool> autoMixRequested { false };
     std::atomic<bool> referenceRequested { false };
@@ -313,6 +322,13 @@ private:
     voxera::SoftClip softClip;
     voxera::Limiter limiter;
 
+    std::vector<std::pair<juce::String, float>> autoMixBefore, autoMixAfter;
+    bool comparingBefore = false;
+    std::atomic<bool> autoMixHistoryValid { false };
+    std::atomic<bool> autoMixComplete { false };
+    voxera::LevelMatch levelMatch;
+    std::atomic<float>* levelMatchParameter {};
+    std::atomic<float>* compColourParameter {};
     juce::String lastReport;
     // Kept so the session can reopen with the same capture in place.
     juce::File loadedNeuralFile;

@@ -31,12 +31,15 @@ public:
         float brightness = 0.0f;
         float pitchConfidence = 0.0f;
         float pitchRangeSemitones = 0.0f;
+        float usefulSeconds = 0.0f;
+        float clippedFraction = 0.0f;
         bool ready = false;
     };
 
     void prepare(double sampleRate)
     {
         sr = sampleRate;
+        activityCoeff = 1.0f - std::exp(-1.0f / static_cast<float>(sr * 0.01));
         cLow = coeff(500.0f);
         cMid = coeff(4000.0f);
         cHigh = coeff(8000.0f);
@@ -47,6 +50,7 @@ public:
     void reset()
     {
         active = false;
+        activity = 0.0f; clippedSamples = 0;
         elapsedSamples = 0;
         voicedFrames = 0;
 
@@ -78,11 +82,18 @@ public:
         if (!active)
             return;
 
+        if (!std::isfinite(mono)) mono = 0.0f;
+        ++elapsedSamples;
         const float ax = std::abs(mono);
+        activity += activityCoeff * (mono * mono - activity);
+        if (activity < 3.162278e-6f) {
+            if (elapsedSamples >= targetSamples) finalise();
+            return;
+        }
+        if (ax >= 0.999f) ++clippedSamples;
         sumSq += static_cast<double>(mono) * static_cast<double>(mono);
         peak = juce::jmax(peak, ax);
         ++sampleCount;
-        ++elapsedSamples;
 
         // Simple one-pole band proxies at ~500 Hz, 4 kHz, 8 kHz, 12 kHz.
 
@@ -155,12 +166,16 @@ private:
             current.pitchRangeSemitones =
                 12.0f * std::log2(maxPitchHz / minPitchHz);
 
-        current.ready = sampleCount > static_cast<int64_t>(sr * 2.0)
+        current.usefulSeconds = static_cast<float>(sampleCount / sr);
+        current.clippedFraction = static_cast<float>(clippedSamples / n);
+        current.ready = current.clippedFraction < 0.01f && sampleCount > static_cast<int64_t>(sr * 2.0)
             && rmsDb > -55.0f;
     }
 
     float cLow = 0.0f, cMid = 0.0f, cHigh = 0.0f, cAir = 0.0f;
     double sr = 48000.0;
+    float activity = 0.0f, activityCoeff = 0.0f;
+    int64_t clippedSamples = 0;
     bool active = false;
     int64_t elapsedSamples = 0;
     int64_t targetSamples = 0;
