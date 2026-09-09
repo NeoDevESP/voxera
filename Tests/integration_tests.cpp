@@ -1019,6 +1019,32 @@ int main(int argc, char** argv)
             running.store(false);
             audio.join();
 
+            /*  Opening and closing each hosted editor, which is where FL
+                Studio actually crashed.
+
+                Its log named the fault precisely: an access violation inside
+                the hosted plugin reached through USER32 — a window message —
+                and not through anything audio. The window used to take the
+                editor without owning it, so closing detached instead of
+                deleting, and what remained was an editor still registered with
+                its plugin and still holding a native window with no parent.
+
+                Creating and destroying the editor the way the window now does
+                is what this exercises. It runs on the message thread, which is
+                the only thread allowed to touch an editor at all.
+            */
+            for (int round = 0; round < juce::jmin(4, candidates.size()); ++round) {
+                if (!host.loadInsertPlugin(candidates[round]).ok) continue;
+                if (!host.insertHasEditor()) continue;
+                for (int open = 0; open < 3; ++open) {
+                    auto* editor = host.createInsertEditor();
+                    CHECK(editor != nullptr);
+                    // Deleted the way the window deletes it, which is what tells
+                    // the plugin its editor has gone.
+                    delete editor;
+                }
+            }
+
             std::cout << "INSERT swap: " << loaded << " plugins swapped in while "
                       << blocks.load() << " blocks were processing" << std::endl;
             CHECK(blocks.load() > 0);

@@ -538,7 +538,23 @@ void VoxeraAudioProcessorEditor::showInsertWindow()
 
     auto window = std::make_unique<HostedWindow>(processor.insertPluginName(), *this);
     window->setUsingNativeTitleBar(true);
-    window->setContentNonOwned(hosted, true);
+    /*  Owned, so closing the window destroys the editor.
+
+        This was the crash, and FL Studio's own log named it: an access
+        violation inside the hosted plugin, reached through USER32 rather than
+        through any audio path, on three different plugins.
+
+        The window used to take the editor without owning it, and closing it
+        detached the editor instead of deleting it. What was left was an editor
+        still alive, still registered with its plugin, still holding a native
+        window — with nothing left to parent it. The next paint or timer message
+        Windows delivered went into an object whose world had been dismantled.
+
+        Owning it means the editor is destroyed properly, which is also what
+        tells the plugin that its editor is gone: that notification comes from
+        the editor's own destructor and never happens if nobody destroys it.
+    */
+    window->setContentOwned(hosted, true);
     window->setResizable(hosted->isResizable(), false);
     window->centreWithSize(hosted->getWidth(), hosted->getHeight());
     window->setVisible(true);
@@ -548,10 +564,9 @@ void VoxeraAudioProcessorEditor::showInsertWindow()
 void VoxeraAudioProcessorEditor::closeInsertWindow()
 {
     if (insertWindow == nullptr) return;
-    // Detached before the window goes, because the editor belongs to the hosted
-    // plugin and destroying it here would leave that plugin holding a dangling
-    // pointer to its own window.
-    insertWindow->clearContentComponent();
+    // Simply released: the window owns the editor, so this destroys it, and the
+    // editor's destructor is what tells the plugin it no longer has one.
+    // Clearing the content first was the fault — it detached without deleting.
     insertWindow.reset();
 }
 
