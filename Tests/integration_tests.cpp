@@ -37,7 +37,7 @@ double measureCost(double sr, int blockSize, bool tracking)
 
     p.prepareToPlay(sr, blockSize);
 
-    const int blocks = static_cast<int>(sr * 10.0 / blockSize);   // ten seconds
+    const int blocks = static_cast<int>(sr * 4.0 / blockSize);   // four seconds, three times
     juce::AudioBuffer<float> b(2, blockSize);
 
     // A sung note rather than silence: gates, detectors and compressors all cost
@@ -53,9 +53,20 @@ double measureCost(double sr, int blockSize, bool tracking)
 
     fill(); p.processBlock(b, midi);   // one block outside the timing, to settle
 
-    const auto start = std::chrono::steady_clock::now();
-    for (int n = 0; n < blocks; ++n) { fill(); p.processBlock(b, midi); }
-    const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    /*  The shortest of several passes.
+
+        A single timing on a machine that is also doing other things measures
+        the machine as much as the code. Noise only ever adds, so the fastest
+        run is the closest to the truth, and taking it is what makes two of
+        these numbers comparable to each other at all.
+    */
+    double elapsed = 1.0e9;
+    for (int pass = 0; pass < 3; ++pass) {
+        const auto start = std::chrono::steady_clock::now();
+        for (int n = 0; n < blocks; ++n) { fill(); p.processBlock(b, midi); }
+        elapsed = juce::jmin(elapsed, std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start).count());
+    }
 
     const double audioSeconds = static_cast<double>(blocks * blockSize) / sr;
     const double realtimeFactor = audioSeconds / elapsed;
@@ -940,11 +951,24 @@ int main(int argc, char** argv)
 
                 fill(); p.processBlock(b, none);   // settle outside the timing
 
-                const int blocks = static_cast<int>(rate * 10.0 / block);
-                const auto started = std::chrono::steady_clock::now();
-                for (int n = 0; n < blocks; ++n) { fill(); p.processBlock(b, none); }
-                const double elapsed = std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - started).count();
+                /*  The best of several passes, not one.
+
+                    Measured once, the same capture on this machine reported
+                    13.9 per cent of a core in one run and 7.2 in another —
+                    the figure was mostly whatever else the computer happened
+                    to be doing. Noise can only ever make a timing longer, so
+                    the shortest run is the one closest to what the code
+                    actually costs, and taking it is what makes the number
+                    mean something rather than describe the afternoon.
+                */
+                const int blocks = static_cast<int>(rate * 4.0 / block);
+                double elapsed = 1.0e9;
+                for (int pass = 0; pass < 5; ++pass) {
+                    const auto started = std::chrono::steady_clock::now();
+                    for (int n = 0; n < blocks; ++n) { fill(); p.processBlock(b, none); }
+                    elapsed = juce::jmin(elapsed, std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - started).count());
+                }
 
                 const double realtime = (blocks * block / rate) / elapsed;
                 std::cout << "     whole chain with the capture running: "
