@@ -225,7 +225,7 @@ juce::Array<juce::File> VoxeraAudioProcessor::availableNeuralModels()
     in the insert slot. It reallocates the dry delay, so it belongs on the
     message thread with audio suspended and nowhere else.
 */
-void VoxeraAudioProcessor::republishLatency(bool announceNow)
+void VoxeraAudioProcessor::republishLatency(bool announceNow, bool allocateDry)
 {
     const int fixedLatency = baseFixedLatency + insertSlot.getLatencySamples();
     fullLatencySamples = fixedLatency + pitchEngine.getLatencySamples();
@@ -236,7 +236,7 @@ void VoxeraAudioProcessor::republishLatency(bool announceNow)
 
     // Sized for the longest any combination of engine and mode can need, so
     // that every switch afterwards only moves an offset rather than allocating.
-    dryDelay.prepare(getTotalNumOutputChannels(), fixedLatency + widestPitchLatency);
+    if (allocateDry) dryDelay.prepare(getTotalNumOutputChannels(), fixedLatency + widestPitchLatency);
     dryDelay.setDelay(latency);
 
     /*  Announced straight away during preparation, and handed to the async
@@ -288,34 +288,16 @@ voxera::PluginSlot::LoadResult VoxeraAudioProcessor::loadInsertPlugin(const juce
 {
     auto result = insertSlot.load(file);
     if (!result.ok) return result;
-
-    const double session = getSampleRate() > 0.0 ? getSampleRate() : 48000.0;
-
-    /*  The swap happens under the lock the host holds around processBlock.
-
-        This was the crash, and it only ever showed when REPLACING a plugin,
-        because that is the only case with an old instance to destroy.
-        suspendProcessing raises a flag; it does not wait for a processBlock
-        already running to come back. So the audio thread could still be inside
-        the outgoing plugin at the moment the message thread deleted it.
-
-        Taking the callback lock is the guarantee that flag never was: JUCE's
-        wrappers hold it around every processBlock, so acquiring it here means
-        the audio thread is certainly outside. Nothing inside the lock does any
-        work beyond exchanging pointers — the buffer was allocated during load,
-        and the outgoing plugin is set aside rather than destroyed.
-    */
+    voxera::IntegerDelay preparedDry;
+    preparedDry.prepare(getTotalNumOutputChannels(), baseFixedLatency + result.latencySamples + widestPitchLatency);
     {
         const juce::ScopedLock audioStopped(getCallbackLock());
         insertSlot.commitLoad();
+        std::swap(dryDelay, preparedDry);
+        republishLatency(false, false);
+        insertAmountParameter = autoMixInsertIndex = -1;
     }
-
-    // Outside the lock: preparing allocates, and shutting a licensed plugin
-    // down can take long enough to be heard if audio is waiting on it.
-    insertSlot.prepare(session, preparedBlockSize, getTotalNumOutputChannels());
     insertSlot.releaseRetired();
-
-    republishLatency();
     if (result.latencySamples > 0)
         result.message += " (adds " + juce::String(result.latencySamples) + " samples of latency)";
     return result;
@@ -323,12 +305,16 @@ voxera::PluginSlot::LoadResult VoxeraAudioProcessor::loadInsertPlugin(const juce
 
 void VoxeraAudioProcessor::unloadInsertPlugin()
 {
+    voxera::IntegerDelay preparedDry;
+    preparedDry.prepare(getTotalNumOutputChannels(), baseFixedLatency + widestPitchLatency);
     {
         const juce::ScopedLock audioStopped(getCallbackLock());
         insertSlot.unload();
+        std::swap(dryDelay, preparedDry);
+        republishLatency(false, false);
+        insertAmountParameter = autoMixInsertIndex = -1;
     }
     insertSlot.releaseRetired();
-    republishLatency();
 }
 
 voxera::NeuralStage::LoadResult VoxeraAudioProcessor::loadNeuralModel(const juce::File& file)
@@ -582,6 +568,7 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     smartEQ.prepare(sampleRate, getTotalNumOutputChannels());
 
     compressor.prepare(sampleRate, getTotalNumOutputChannels());
+    insertSlot.setHostContext(getPlayHead(), isNonRealtime());
     insertSlot.prepare(sampleRate, samplesPerBlock, getTotalNumOutputChannels());
     compressor.reset();
 
@@ -644,6 +631,9 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     pitchEngine.setShifterBypassed(shifterBypassed);
     republishLatency(true);
     dryBuffer.setSize(getTotalNumOutputChannels(), preparedBlockSize);
+    deEssMonitorBuffer.setSize(getTotalNumOutputChannels(), preparedBlockSize);
+    deEssMonitorBlend.reset(sampleRate, 0.015);
+    deEssMonitorBlend.setCurrentAndTargetValue(0.0f);
     globalWet.reset(sampleRate, 0.020);
     globalWet.setCurrentAndTargetValue(prm.bypass->load() > 0.5f
         ? 0.0f : prm.globalMix->load() * 0.01f);
@@ -654,6 +644,7 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 void VoxeraAudioProcessor::releaseResources()
 {
+    insertSlot.releaseResources();
     autoGain.reset();
 
     /*  A listen in progress survives the host restarting us.
@@ -728,6 +719,9 @@ juce::AudioProcessorParameter* VoxeraAudioProcessor::getBypassParameter() const
 void VoxeraAudioProcessor::processAudio(juce::AudioBuffer<float>& buffer, bool hostBypass)
 {
     if (buffer.getNumSamples() == 0 || buffer.getNumChannels() == 0) return;
+    const juce::ScopedLock audioGuard(getCallbackLock());
+    insertSlot.setHostContext(getPlayHead(), isNonRealtime());
+    if (insertSlot.consumeLatencyChange()) triggerAsyncUpdate();
     inputMeters.analyse(buffer);
     for (int offset = 0; offset < buffer.getNumSamples(); offset += preparedBlockSize)
     {
@@ -1053,7 +1047,7 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
         them over a reverb tail, which is the one place sibilance is hardest to
         remove afterwards.
     */
-    spectralEngine.processDeEss(buffer);
+    spectralEngine.processDeEss(buffer, &deEssMonitorBuffer);
 
     double bpm = 120.0;
     // Negative means the host offered no musical position; the chop falls back
@@ -1128,11 +1122,15 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
 
     const bool bypass = hostBypass || prm.bypass->load() > 0.5f;
     globalWet.setTargetValue(bypass ? 0.0f : prm.globalMix->load() * 0.01f);
+    deEssMonitorBlend.setTargetValue(!bypass && listenDeEss.load() ? 1.0f : 0.0f);
     for (int i = 0; i < buffer.getNumSamples(); ++i) {
         const float wet = globalWet.getNextValue();
+        const float monitor = deEssMonitorBlend.getNextValue();
         for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
             auto& y = buffer.getWritePointer(ch)[i];
             y = wet * y + (1.0f - wet) * dryBuffer.getReadPointer(ch)[i];
+            const float removed = juce::jlimit(-1.0f, 1.0f, deEssMonitorBuffer.getSample(ch,i));
+            y += monitor * (removed - y);
         }
         if (++scopeDecimation >= 16) {
             scopeDecimation = 0;
@@ -1203,6 +1201,8 @@ void VoxeraAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     state.removeProperty("insertPlugin", nullptr);
     state.removeProperty("insertState", nullptr);
     if (insertSlot.pluginFile().exists()) {
+        state.setProperty("insertAmountParameter", insertAmountParameter, nullptr);
+        state.setProperty("insertAmountDecreases", insertAmountDecreases, nullptr);
         state.setProperty("insertPlugin", insertSlot.pluginFile().getFullPathName(), nullptr);
         const auto hosted = insertSlot.getHostedState();
         if (hosted.getSize() > 0)
@@ -1306,12 +1306,19 @@ void VoxeraAudioProcessor::setStateInformation(const void* data, int sizeInBytes
             without it does not sound the same, and the person deserves to be
             told which plugin is missing instead of wondering why.
         */
+        unloadInsertPlugin();
         if (const auto path = state.getProperty("insertPlugin").toString(); path.isNotEmpty()) {
             const auto result = loadInsertPlugin(juce::File(path));
             if (result.ok) {
                 juce::MemoryBlock hosted;
-                if (hosted.fromBase64Encoding(state.getProperty("insertState").toString()))
+                if (hosted.fromBase64Encoding(state.getProperty("insertState").toString())) {
+                    const juce::ScopedLock audioStopped(getCallbackLock());
                     insertSlot.setHostedState(hosted);
+                    insertSlot.refreshLatency();
+                    republishLatency();
+                }
+                insertAmountParameter = static_cast<int>(state.getProperty("insertAmountParameter", -1));
+                insertAmountDecreases = static_cast<bool>(state.getProperty("insertAmountDecreases", false));
             } else {
                 lastReport = "Insert plugin unavailable: " + path + ". " + result.message;
             }
@@ -1340,6 +1347,12 @@ void VoxeraAudioProcessor::setParameterNotifying(const char* id, float value)
 
 void VoxeraAudioProcessor::handleAsyncUpdate()
 {
+    {
+        const juce::ScopedLock audioStopped(getCallbackLock());
+        const int previous = insertSlot.getLatencySamples();
+        insertSlot.refreshLatency();
+        if (previous != insertSlot.getLatencySamples()) republishLatency();
+    }
     if (latencyChangePending.exchange(false)) {
         setLatencySamples(activeLatencySamples.load());
         updateHostDisplay(ChangeDetails{}.withLatencyChanged(true));
@@ -1410,19 +1423,22 @@ void VoxeraAudioProcessor::applyAutoMix()
         result nobody asked for, and the person can always take it further by
         hand once they hear where it landed.
     */
+    autoMixInsertIndex = -1;
     juce::String insertNote;
     if (insertSlot.hasPlugin()) {
-        const int amount = insertSlot.findAmountControl();
-        if (amount >= 0) {
-            const float wanted = juce::jlimit(0.25f, 0.75f, 0.30f + 0.45f * diagnosis.dynamics);
-            insertSlot.setParameter(amount, wanted);
+        const int amount = insertAmountParameter;
+        if (intensity > 0.0f && !locked("autoMixLockDynamics")
+            && juce::isPositiveAndBelow(amount, insertSlot.parameterNames().size())) {
+            autoMixInsertIndex = amount;
+            autoMixInsertBefore = insertSlot.getParameter(amount);
+            const float direction = insertAmountDecreases ? -1.0f : 1.0f;
+            autoMixInsertAfter = juce::jlimit(0.0f, 1.0f, autoMixInsertBefore
+                + direction * 0.20f * diagnosis.dynamics * intensity);
+            insertSlot.setParameter(amount, autoMixInsertAfter);
             insertNote = " " + insertSlot.pluginName() + ": "
-                       + insertSlot.parameterNames()[amount] + " set to "
-                       + insertSlot.parameterText(amount) + ".";
+                + insertSlot.parameterNames()[amount] + " = " + insertSlot.parameterText(amount) + ".";
         } else {
-            insertNote = " " + insertSlot.pluginName()
-                       + " left alone: none of its controls name themselves as the one that"
-                         " sets how hard it compresses.";
+            insertNote = " External settings preserved. Map a control and its direction in the Insert menu to include it in Auto Mix.";
         }
     }
     set(ParamIDs::optical, settings.optical);
@@ -1452,13 +1468,14 @@ void VoxeraAudioProcessor::applyAutoMix()
     if (insertNote.isNotEmpty()) lastReport += juce::newLine + juce::String("INSERT") + insertNote;
     lastReport += "\nAPPLIED at " + juce::String(intensity * 100.0f, 0) + "% (locked sections preserved):";
     for (const auto& [id, value] : autoMixAfter) lastReport += "\n   " + id + " " + juce::String(value, 1);
-    autoMixHistoryValid.store(!autoMixBefore.empty());
+    autoMixHistoryValid.store(!autoMixBefore.empty() || autoMixInsertIndex >= 0);
 }
 
 void VoxeraAudioProcessor::compareAutoMix()
 {
     if (!canUndoAutoMix()) return;
     comparingBefore = !comparingBefore;
+    if (autoMixInsertIndex >= 0) insertSlot.setParameter(autoMixInsertIndex, comparingBefore ? autoMixInsertBefore : autoMixInsertAfter);
     for (const auto& [id, value] : comparingBefore ? autoMixBefore : autoMixAfter)
         setParameterNotifying(id.toRawUTF8(), value);
 }
@@ -1466,6 +1483,8 @@ void VoxeraAudioProcessor::compareAutoMix()
 void VoxeraAudioProcessor::undoAutoMix()
 {
     if (!canUndoAutoMix()) return;
+    if (autoMixInsertIndex >= 0) insertSlot.setParameter(autoMixInsertIndex, autoMixInsertBefore);
+    autoMixInsertIndex = -1;
     for (const auto& [id, value] : autoMixBefore) setParameterNotifying(id.toRawUTF8(), value);
     autoMixBefore.clear(); autoMixAfter.clear(); comparingBefore = false;
     autoMixHistoryValid.store(false);
@@ -1667,8 +1686,9 @@ void VoxeraAudioProcessor::setCurrentProgram(int index)
 // (half note at 40 BPM = 3s), current feedback, and maximum reverb decay.
 double VoxeraAudioProcessor::getTailLengthSeconds() const
 {
+    const juce::ScopedLock audioStopped(getCallbackLock());
     const double feedback = juce::jlimit(0.0, 0.78,
         static_cast<double>(prm.delayFeedback->load()) * 0.0078);
     const double repeats = feedback > 0.000001 ? std::log(0.001) / std::log(feedback) : 0.0;
-    return 4.8 + 3.0 * (1.0 + repeats);
+    return insertSlot.tailSeconds() + 4.8 + 3.0 * (1.0 + repeats);
 }

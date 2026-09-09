@@ -1069,6 +1069,49 @@ int main(int argc, char** argv)
                 }
             }
 
+            const int amount = host.findInsertParameter({"Peak Reduct", "Threshold", "Input"});
+            if(amount >= 0) {
+                host.mapInsertAmount(amount,true);
+                host.setInsertParameter(amount,0.5f);
+                const float initial=host.insertParameterValue(amount);
+                const auto capture = [&] {
+                    host.requestAutoMix();
+                    juce::AudioBuffer<float> voice(2,128); juce::MidiBuffer events;
+                    for(int n=0;n<3005;++n) {
+                        for(int i=0;i<128;++i) {
+                            const int sample=n*128+i;
+                            const float amp=sample%48000<1200 ? 0.5f : 0.03f;
+                            const float x=amp*std::sin(float(sample*2*juce::MathConstants<double>::pi*220/48000));
+                            voice.setSample(0,i,x); voice.setSample(1,i,x);
+                        }
+                        host.processBlock(voice,events);
+                    }
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil(30);
+                };
+                set(host,"autoMixIntensity",0); capture();
+                CHECK(std::abs(host.insertParameterValue(amount)-initial)<0.001f);
+                set(host,"autoMixIntensity",100); set(host,"autoMixLockDynamics",1); capture();
+                CHECK(std::abs(host.insertParameterValue(amount)-initial)<0.001f);
+                set(host,"autoMixLockDynamics",0); capture();
+                const float after=host.insertParameterValue(amount);
+                CHECK(after < initial);
+                host.compareAutoMix(); CHECK(std::abs(host.insertParameterValue(amount)-initial)<0.001f);
+                host.compareAutoMix(); CHECK(std::abs(host.insertParameterValue(amount)-after)<0.001f);
+                host.undoAutoMix(); CHECK(std::abs(host.insertParameterValue(amount)-initial)<0.001f);
+                std::cout << "PASS hosted Auto Mix zero intensity, lock, direction, A/B and undo\n";
+            } else std::cout << "SKIP hosted mapping: no compatible test control\n";
+
+            // Restoring an empty slot must remove the previous insert even
+            // while an editor still owns a lease on the outgoing processor.
+            VoxeraAudioProcessor empty;
+            juce::MemoryBlock emptyState; empty.getStateInformation(emptyState);
+            auto lease = host.insertEditorLease();
+            std::unique_ptr<juce::AudioProcessorEditor> outgoing(host.createInsertEditor());
+            host.setStateInformation(emptyState.getData(), int(emptyState.getSize()));
+            CHECK(!host.hasInsertPlugin());
+            if (outgoing) outgoing->createComponentSnapshot(outgoing->getLocalBounds());
+            outgoing.reset(); lease.reset();
+
             std::cout << "INSERT swap: " << loaded << " plugins swapped in while "
                       << blocks.load() << " blocks were processing" << std::endl;
             CHECK(blocks.load() > 0);
@@ -1206,7 +1249,7 @@ int main(int argc, char** argv)
         }
     }
     CHECK(checkedAttachment && checkedEQAttachment);
-    for (const auto& name : {"VOCALS", "FX", "PRESETS", "MORE", "SMART EQ", "CHOP"}) {
+    for (const auto& name : {"VOCALS", "FX", "DYNAMICS", "ADVANCED", "SMART EQ", "CHOP"}) {
         for (auto* child : editor->getChildren()) if (auto* button = dynamic_cast<juce::TextButton*>(child))
             if (button->getButtonText() == name) button->onClick();
         if (juce::String(name) == "SMART EQ") {
@@ -1215,6 +1258,10 @@ int main(int argc, char** argv)
             for (int i=0;i<96000;++i) for(int ch=0;ch<2;++ch)
                 testTone.setSample(ch,i,0.2f*std::sin(static_cast<float>(i*juce::MathConstants<double>::twoPi*1000.0/48000.0)));
             restored.processBlock(testTone, midi);
+        }
+        for (auto* child : editor->getChildren()) {
+            if (!child->isVisible() || child->getWidth()==0) continue;
+            CHECK(editor->getLocalBounds().contains(child->getBounds()));
         }
         const auto image = editor->createComponentSnapshot(editor->getLocalBounds());
         const auto file = folder.getChildFile(juce::String(name).toLowerCase().replace(" ", "_") + ".png");

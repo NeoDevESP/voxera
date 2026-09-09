@@ -30,9 +30,20 @@ namespace voxera
     brought the session down. Nothing here can prevent that, so the loading path
     at least refuses clearly rather than half-succeeding.
 */
-class PluginSlot
+class PluginSlot : private juce::AudioProcessorListener
 {
 public:
+    ~PluginSlot() { if (current) current->removeListener(this); }
+    std::shared_ptr<juce::AudioPluginInstance> editorLease() const { return current; }
+    bool consumeLatencyChange() { return latencyDirty.exchange(false); }
+    void refreshLatency() { hostedLatency = current ? current->getLatencySamples() : 0; }
+    void releaseResources() { if (current) current->releaseResources(); }
+    void setHostContext(juce::AudioPlayHead* head, bool offline) {
+        parentOffline.store(offline);
+        if (auto* p = active.load()) { p->setPlayHead(head); p->setNonRealtime(offline); }
+    }
+    double tailSeconds() const { return current ? current->getTailLengthSeconds() : 0.0; }
+
     struct LoadResult
     {
         bool ok = false;
@@ -52,6 +63,8 @@ public:
         // After the scratch exists, and sized from what the plugin asks for
         // rather than from our own channel count.
         if (current != nullptr) { prepareHosted(*current); sizeScratch(*current); }
+        refreshLatency();
+        hostedMidi.ensureSize(65536);
     }
 
     void reset()
@@ -67,7 +80,7 @@ public:
     const juce::File& pluginFile() const noexcept { return loadedFile; }
     int getLatencySamples() const noexcept { return hostedLatency; }
 
-    /*  Builds the instance. Message thread only, with audio stopped.
+    /*  Builds the pending instance off the audio thread; the active instance keeps running.
 
         Scanning and instantiating both allocate, and either can take seconds
         because a licensed plugin may go and talk to its authorisation service
@@ -97,6 +110,9 @@ public:
             return result;
         }
 
+        if (found.getFirst()->name.startsWithIgnoreCase("VOXERA")) {
+            result.message = "VOXERA cannot be inserted inside itself."; return result;
+        }
         juce::String error;
         auto instance = formats.createPluginInstance(*found.getFirst(), sr, capacity, error);
         if (instance == nullptr) {
@@ -141,9 +157,11 @@ public:
             destroyed, because tearing down a VST3 can take long enough to be
             heard if it happens while audio is waiting.
         */
+        if (current) current->removeListener(this);
         retired = std::move(current);
         active.store(pending.get(), std::memory_order_release);
         current = std::move(pending);
+        if (current) current->addListener(this);
         // std::swap on the buffers themselves: AudioBuffer has no swap of its
         // own, and moving is what makes this free rather than a reallocation.
         std::swap(scratch, pendingScratch);
@@ -173,6 +191,7 @@ public:
         */
         active.store(nullptr, std::memory_order_release);
         // Set aside rather than destroyed here, for the same reason as above.
+        if (current) current->removeListener(this);
         retired = std::move(current);
         pending.reset();
         loadedName = {};
@@ -295,7 +314,9 @@ public:
         if (current == nullptr) return;
         const auto& parameters = current->getParameters();
         if (!juce::isPositiveAndBelow(index, parameters.size())) return;
+        parameters[index]->beginChangeGesture();
         parameters[index]->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, normalised));
+        parameters[index]->endChangeGesture();
     }
 
     /*  The control that decides how hard the hosted unit works.
@@ -431,8 +452,8 @@ private:
         configureBuses(instance, numChannels);
         instance.setPlayConfigDetails(instance.getTotalNumInputChannels(),
                                       instance.getTotalNumOutputChannels(), sr, capacity);
+        instance.setNonRealtime(parentOffline.load());
         instance.prepareToPlay(sr, capacity);
-        instance.setNonRealtime(false);
     }
 
     // Wide enough for whatever the hosted plugin ended up wanting, worked out
@@ -446,7 +467,12 @@ private:
 
     juce::AudioPluginFormatManager formats;
     std::atomic<juce::AudioPluginInstance*> active { nullptr };
-    std::unique_ptr<juce::AudioPluginInstance> current, pending, retired;
+    std::shared_ptr<juce::AudioPluginInstance> current, pending, retired;
+    std::atomic<bool> latencyDirty { false }, parentOffline { false };
+    void audioProcessorParameterChanged(juce::AudioProcessor*, int, float) override {}
+    void audioProcessorChanged(juce::AudioProcessor*, const juce::AudioProcessorListener::ChangeDetails& d) override {
+        if (d.latencyChanged) latencyDirty.store(true);
+    }
     juce::AudioBuffer<float> scratch, pendingScratch;
     juce::MidiBuffer hostedMidi;
     juce::SmoothedValue<float> mix;

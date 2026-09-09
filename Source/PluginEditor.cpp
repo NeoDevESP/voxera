@@ -96,7 +96,7 @@ VoxeraAudioProcessorEditor::Control& VoxeraAudioProcessorEditor::addControl(cons
     const auto* parameter = processor.apvts.getParameter(id);
     slider.setDoubleClickReturnValue(true, parameter->convertFrom0to1(parameter->getDefaultValue()));
     control->label.setText(title, juce::dontSendNotification);
-    control->label.setFont(font(large ? 17.0f : 11.0f, true));
+    control->label.setFont(font(large ? 17.0f : 13.0f, true));
     control->label.setJustificationType(juce::Justification::centred);
     control->label.setColour(juce::Label::textColourId, large ? ink : pink);
     addAndMakeVisible(slider); addAndMakeVisible(control->label);
@@ -140,7 +140,16 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
     compressorChoice.label.setColour(juce::Label::textColourId, pink);
     addAndMakeVisible(compressorChoice.combo); addAndMakeVisible(compressorChoice.label);
     compressorChoice.attachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(processor.apvts, "compType", compressorChoice.combo);
-    const char* tabNames[] = {"VOCALS", "FX", "PRESETS", "MORE", "SMART EQ", "CHOP"};
+    addControl("clean", "CLEAN", 0);
+    addControl("deEss", "DE-ESS", 0);
+    addControl("voiceMatch", "VOICE MATCH", 0);
+    addControl("compThreshold", "THRESHOLD", 2);
+    addControl("compRatio", "RATIO", 2);
+    addControl("compAttack", "ATTACK", 2);
+    addControl("compRelease", "RELEASE", 2);
+    addControl("optical", "OPTO LEVEL", 2);
+    addControl("density", "DENSITY", 2);
+    const char* tabNames[] = {"VOCALS", "FX", "DYNAMICS", "ADVANCED", "SMART EQ", "CHOP"};
     for (int i = 0; i < 6; ++i) {
         auto& tab = tabs[static_cast<size_t>(i)];
         tab.setButtonText(tabNames[i]); tab.onClick = [this, i] { selectPage(i); };
@@ -171,6 +180,22 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
         b.onClick = [this, i] { processor.applyFactoryPreset(i); };
         addAndMakeVisible(b);
     }
+    for (int i = 0; i < VoxeraAudioProcessor::numFactoryPresets; ++i)
+        presetPicker.addItem(processor.getProgramName(i), i + 1);
+    listenEss.onStateChange = [this] { processor.listenDeEss.store(listenEss.isDown()); };
+    listenEss.setTooltip("Hold to hear only what the de-esser removes. Release to return to your vocal.");
+    addAndMakeVisible(listenEss);
+    presetPicker.setTextWhenNothingSelected("Choose a starting sound");
+    presetPicker.setName("Starting sound");
+    presetPicker.onChange = [this] { processor.applyFactoryPreset(presetPicker.getSelectedId() - 1); };
+    addAndMakeVisible(presetPicker);
+    mixReport.setMultiLine(true); mixReport.setReadOnly(true);
+    mixReport.setScrollbarsShown(true); mixReport.setCaretVisible(false);
+    mixReport.setFont(font(14.0f));
+    mixReport.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff211a24));
+    mixReport.setColour(juce::TextEditor::textColourId, juce::Colour(0xffeee6ef));
+    mixReport.setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
+    mixReport.setName("Auto Mix result"); addAndMakeVisible(mixReport);
     analyze.onClick = [this] { processor.requestVoiceCapture(); };
     analyze.setTooltip("Sing a representative phrase for 8 seconds while audio is running.");
     autoMix.onClick = [this] { processor.requestAutoMix(); };
@@ -200,7 +225,7 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
     insertButton.onClick = [this] { chooseInsertPlugin(); };
     insertButton.setTooltip("Puts one of your own plugins inside this chain, after the dynamics "
                             "and before the harmonic stages. Auto Mix will set its main control "
-                            "if it can recognise one.");
+                            "after you choose the control and its direction in this menu.");
     loadModel.setTooltip("Loads a Neural Amp Modeler capture (.nam) or an RTNeural model (.json) "
                          "and runs it where a preamp would sit. Captures of microphone preamps and "
                          "console channels are what suit a voice. NAM LSTM and WaveNet up to 12 channels "
@@ -210,19 +235,9 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
     bypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.apvts, "bypass", bypass);
     lowLatency.setClickingTogglesState(true);
     lowLatency.setTooltip("For singing through the plugin. Takes the pitch shifter out of the "
-                          "path, which is where nearly all the delay comes from: about 59 ms "
-                          "drops to under 5. Everything else keeps working; only the tuning "
+                          "path. The latency display shows the current total, including any inserted plugin. Only the tuning "
                           "stops. Turn it off again to mix.");
     lowLatencyAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.apvts, "lowLatency", lowLatency);
-    motion.setClickingTogglesState(true);
-    motion.setToggleState(true, juce::dontSendNotification);
-    motion.setTooltip("Turn decorative animation on or off. Audio meters remain live.");
-    motion.onClick = [this] {
-        motion.setButtonText(motion.getToggleState() ? "MOTION ON" : "MOTION OFF");
-        animationTime = voiceMotion = 0.0f;
-        repaint();
-    };
-    addAndMakeVisible(motion);
     for (auto* b : {&compareMix, &undoMix, &mixOptions, &matchLevel, &analyze, &autoMix, &learnVoice, &savePreset, &loadPreset, &loadModel, &insertButton,
                     &bypass, &lowLatency})
         addAndMakeVisible(b);
@@ -236,6 +251,7 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
 VoxeraAudioProcessorEditor::~VoxeraAudioProcessorEditor()
 {
     stopTimer(); chooser.reset();
+    processor.listenDeEss.store(false);
     /*  The hosted plugin's window goes before anything else.
 
         It shows an editor belonging to the plugin in the insert slot, and that
@@ -250,23 +266,19 @@ VoxeraAudioProcessorEditor::~VoxeraAudioProcessorEditor()
 void VoxeraAudioProcessorEditor::selectPage(int page)
 {
     activePage = page;
+    processor.listenDeEss.store(false);
+    listenEss.setVisible(page == 0);
     for (auto& c : controls) {
         const bool visible = c->page < 0 || c->page == page;
         c->slider.setVisible(visible); c->label.setVisible(visible);
     }
-    // The first three selectors belong to VOCALS, the last three to CHOP.
     for (size_t i = 0; i < choices.size(); ++i) {
-        const bool visible = (i < 3) ? (page == 0) : (page == 5);
+        const bool visible = i < 3 ? page == 0 : page == 5;
         choices[i].combo.setVisible(visible); choices[i].label.setVisible(visible);
     }
-    for (auto& b : presets) b.setVisible(page == 2);
-    analyze.setVisible(page == 0); autoMix.setVisible(page == 0);
-    compareMix.setVisible(page == 0); undoMix.setVisible(page == 0);
-    mixOptions.setVisible(page == 0); matchLevel.setVisible(page == 0);
-    learnVoice.setVisible(page == 0);
-    savePreset.setVisible(page == 2); loadPreset.setVisible(page == 2);
-    loadModel.setVisible(page == 2);
-    insertButton.setVisible(page == 2);
+    for (auto& b : presets) b.setVisible(false);
+    analyze.setVisible(page == 4); learnVoice.setVisible(page == 4);
+    loadModel.setVisible(page == 2); insertButton.setVisible(page == 2);
     compressorChoice.combo.setVisible(page == 2); compressorChoice.label.setVisible(page == 2);
     advancedViewport.setVisible(page == 3);
     for (int i = 0; i < 6; ++i) tabs[static_cast<size_t>(i)].setToggleState(i == page, juce::dontSendNotification);
@@ -276,96 +288,60 @@ void VoxeraAudioProcessorEditor::resized()
 {
     const float scale = static_cast<float>(getWidth()) / 1200.0f;
     auto place = [scale](juce::Component& c, int x, int y, int w, int h) {
-        c.setBounds((juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y), static_cast<float>(w), static_cast<float>(h)) * scale).toNearestInt());
+        c.setBounds((juce::Rectangle<float>(float(x), float(y), float(w), float(h)) * scale).toNearestInt());
     };
-    // Six tabs now, so they are narrower and start further left. The row must
-    // end before the OUT meter, which owns the panel from x=1000.
-    for (int i = 0; i < 6; ++i) place(tabs[static_cast<size_t>(i)], 285 + i * 106, 87, 98, 30);
-
-    /*  CHOP page. The three selectors sit on the left where VOCALS puts its
-        pitch selectors, and the seven knobs fill the rest of the panel in two
-        rows, clear of the y=124 meter strip above and the y=548 divider below.
-    */
-    for (int i = 0; i < 3; ++i) {
-        auto& c = choices[static_cast<size_t>(3 + i)];
-        place(c.label, 98 + i * 160, 350, 150, 20);
-        place(c.combo, 98 + i * 160, 382, 148, 32);
-    }
-    for (int i = 0; i < 4; ++i) {
-        auto& c = *controls[static_cast<size_t>(17 + i)];
-        place(c.label, 600 + i * 130, 350, 112, 22);
-        place(c.slider, 600 + i * 130, 384, 112, 100);
-    }
-    for (int i = 0; i < 3; ++i) {
-        auto& c = *controls[static_cast<size_t>(21 + i)];
-        // The dark panel ends near y=520; a taller row puts the value boxes out
-        // over the bezel.
-        place(c.label, 98 + i * 160, 414, 150, 20);
-        place(c.slider, 98 + i * 160, 436, 150, 82);
-    }
+    place(listenEss, 938, 145, 204, 30);
+    place(presetPicker, 308, 27, 260, 36);
+    place(lowLatency, 594, 27, 140, 36); place(bypass, 746, 27, 100, 36);
+    place(savePreset, 818, 796, 158, 28); place(loadPreset, 990, 796, 158, 28);
+    for (int i = 0; i < 6; ++i) place(tabs[size_t(i)], 300 + i*146, 94, 138, 38);
+    place(autoMix, 44, 173, 220, 50);
+    place(mixOptions, 44, 234, 220, 34);
+    place(compareMix, 44, 280, 106, 34); place(undoMix, 158, 280, 106, 34);
+    place(matchLevel, 44, 326, 220, 34);
+    place(mixReport, 44, 378, 220, 170);
     for (int i = 0; i < 5; ++i) {
-        auto& c = *controls[static_cast<size_t>(i)];
-        place(c.label, 195 + i * 176, 560, 146, 26);
-        place(c.slider, 195 + i * 176, 605, 146, 155);
+        auto& c = *controls[size_t(i)];
+        place(c.label, 55+i*230, 607, 170, 24);
+        place(c.slider, 55+i*230, 637, 170, 135);
     }
     for (int i = 0; i < 3; ++i) {
-        auto& c = choices[static_cast<size_t>(i)];
-        place(c.label, 98 + i * 160, 357, 150, 20);
-        place(c.combo, 98 + i * 160, 382, 148, 32);
-        auto& knob = *controls[static_cast<size_t>(5 + i)];
-        place(knob.label, 620 + i * 130, 350, 112, 22);
-        place(knob.slider, 620 + i * 130, 384, 112, 104);
+        auto& c = choices[size_t(i)];
+        place(c.label, 326+i*278, 182, 248, 22);
+        place(c.combo, 326+i*278, 208, 248, 36);
     }
-    for (int i = 0; i < 3; ++i) {
-        auto& c = *controls[static_cast<size_t>(14 + i)];
-        place(c.label, 195 + i * 240, 350, 150, 22);
-        place(c.slider, 195 + i * 240, 384, 150, 104);
+    // The same grid gives every control its own label, gesture area and value.
+    auto knob = [&](int index, int column, int row, int columns=3) {
+        const int width = 816/columns;
+        auto& c = *controls[size_t(index)];
+        place(c.label, 326+column*width, 274+row*146, width-20, 22);
+        place(c.slider, 326+column*width, 300+row*146, width-20, 110);
+    };
+    for (int i=0; i<3; ++i) { knob(5+i,i,0); knob(25+i,i,1); }
+    for (int i=0; i<6; ++i) knob(8+i,i%3,i/3);
+    for (int i=0; i<3; ++i) knob(14+i,i,1);
+    for (int i=0; i<3; ++i) {
+        auto& c=choices[size_t(3+i)];
+        place(c.label,326+i*278,182,248,22); place(c.combo,326+i*278,208,248,36);
     }
-    // Three buttons where there used to be two, and the dark panel's inner edge
-    // is at about y=520: shorter and tighter so the last one stays inside it.
-    place(analyze, 98, 430, 190, 26);
-    place(autoMix, 98, 459, 190, 26);
-    place(learnVoice, 98, 488, 190, 26);
-    place(compareMix, 310, 430, 130, 26); place(undoMix, 448, 430, 130, 26);
-    place(mixOptions, 310, 462, 130, 26); place(matchLevel, 448, 462, 130, 26);
-    for (int i = 0; i < 6; ++i) {
-        auto& c = *controls[static_cast<size_t>(8 + i)];
-        place(c.label, 115 + i * 157, 350, 120, 22);
-        place(c.slider, 115 + i * 157, 388, 120, 103);
-    }
-    // Ten across the same span the five used to have. The cell is narrower than
-    // the pitch so neighbouring buttons never share an edge, which is the same
-    // reason the meters above are laid out that way.
-    for (int i = 0; i < VoxeraAudioProcessor::numFactoryPresets; ++i)
-        place(presets[static_cast<size_t>(i)], 110 + i * 98, 374, 92, 40);
-    place(savePreset, 405, 440, 178, 34); place(loadPreset, 603, 440, 178, 34);
-    place(loadModel, 405, 484, 184, 32);
-    place(insertButton, 597, 484, 184, 32);
-    place(compressorChoice.label, 110, 438, 220, 20);
-    place(compressorChoice.combo, 110, 466, 230, 32);
-    place(controls[24]->label, 845, 424, 160, 22);
-    place(controls[24]->slider, 845, 448, 160, 68);
-    place(bypass, 63, 644, 104, 54);
-    place(lowLatency, 63, 706, 104, 34);
-    place(motion, 1000, 22, 130, 30);
-    place(advancedViewport, 92, 337, 1012, 172);
-    advancedEditor->setSize(advancedViewport.getWidth(), advancedViewport.getHeight());
+    for (int i=0; i<7; ++i) knob(17+i,i%4,i/4,4);
+    place(compressorChoice.label,326,178,242,22);
+    place(compressorChoice.combo,326,208,242,36);
+    place(loadModel,588,208,260,36); place(insertButton,868,208,274,36);
+    knob(24,0,0,4);
+    for (int i=0; i<6; ++i) knob(28+i,(i+1)%4,(i+1)/4,4);
+    place(analyze,326,206,240,38); place(learnVoice,588,206,240,38);
+    place(advancedViewport,320,186,832,376);
+    advancedEditor->setSize(advancedViewport.getWidth()-18, advancedViewport.getHeight());
 }
 void VoxeraAudioProcessorEditor::timerCallback()
 {
-    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
-    const float elapsed = lastAnimationTime > 0.0
-        ? static_cast<float>(juce::jlimit(0.0, 0.1, now - lastAnimationTime)) : 0.0f;
-    lastAnimationTime = now;
-    if (isShowing() && motion.getToggleState() && !bypass.getToggleState()) {
-        animationTime = std::fmod(animationTime + elapsed, 60.0f);
-        const float target = juce::jlimit(0.0f, 1.0f,
-            (processor.inputMeters.peakDb.load() + 48.0f) / 42.0f);
-        const float response = target > voiceMotion ? 0.08f : 0.24f;
-        voiceMotion += (target - voiceMotion) * (1.0f - std::exp(-elapsed / response));
-    } else {
-        animationTime = voiceMotion = 0.0f;
-    }
+    if (hostedLease && hostedLease != processor.insertEditorLease()) closeInsertWindow();
+    const juce::String report = processor.autoMixReport().isEmpty()
+        ? "Play a vocal phrase, then press Auto Mix.\n\nListen for 8 seconds. Compare the result and adjust any control.\n\nUse LOW LATENCY while recording. Tuning resumes when it is off."
+        : processor.autoMixReport();
+    if (mixReport.getText() != report) mixReport.setText(report, false);
+    autoMix.setButtonText(processor.capturing.load() ? "LISTENING " + juce::String(int(processor.captureProgress.load()*100)) + "%" : "AUTO MIX (8s)");
     inPeak = juce::jmax(processor.inputMeters.peakDb.load(), inPeak - 1.3f);
     outPeak = juce::jmax(processor.meters.peakDb.load(), outPeak - 1.3f);
     const bool running = processor.capturing.load();
@@ -456,12 +432,22 @@ void VoxeraAudioProcessorEditor::chooseInsertPlugin()
         menu.addSeparator();
         menu.addItem(-2, "Open its window");
         menu.addItem(-3, "Remove it from the chain");
+        juce::PopupMenu mapping;
+        mapping.addItem(10000, "Keep external settings unchanged", true, processor.insertAmountMapping() < 0);
+        const auto names = processor.insertParameterNames();
+        for (int i = 0; i < names.size(); ++i)
+            if (!voxera::PluginSlot::isBoilerplate(names[i]))
+                mapping.addItem(10001+i, names[i], true, processor.insertAmountMapping()==i);
+        menu.addSubMenu("Auto Mix control (choose explicitly)", mapping);
+        menu.addItem(-4, "More compression = lower value", true, processor.insertAmountIsReversed());
     }
 
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(insertButton),
         [safe = juce::Component::SafePointer<VoxeraAudioProcessorEditor>(this), found](int choice) {
             if (safe == nullptr || choice == 0) return;
 
+            if (choice >= 10000) { safe->processor.mapInsertAmount(choice-10001, safe->processor.insertAmountIsReversed()); return; }
+            if (choice == -4) { safe->processor.mapInsertAmount(safe->processor.insertAmountMapping(), !safe->processor.insertAmountIsReversed()); return; }
             if (choice == -2) { safe->showInsertWindow(); return; }
             if (choice == -3) {
                 // The window first, then the plugin: it holds a pointer into it.
@@ -521,6 +507,7 @@ void VoxeraAudioProcessorEditor::showInsertWindow()
         return;
     }
 
+    hostedLease = processor.insertEditorLease();
     auto* hosted = processor.createInsertEditor();
     if (hosted == nullptr) return;
 
@@ -563,11 +550,12 @@ void VoxeraAudioProcessorEditor::showInsertWindow()
 
 void VoxeraAudioProcessorEditor::closeInsertWindow()
 {
-    if (insertWindow == nullptr) return;
+    if (insertWindow == nullptr) { hostedLease.reset(); return; }
     // Simply released: the window owns the editor, so this destroys it, and the
     // editor's destructor is what tells the plugin it no longer has one.
     // Clearing the content first was the fault — it detached without deleting.
     insertWindow.reset();
+    hostedLease.reset();
 }
 
 void VoxeraAudioProcessorEditor::chooseNeuralModel()
@@ -601,6 +589,8 @@ void VoxeraAudioProcessorEditor::chooseNeuralModel()
             auto& chooser = safe->chooser;
             if (choice == 0) return;
 
+            if (choice >= 10000) { safe->processor.mapInsertAmount(choice-10001, safe->processor.insertAmountIsReversed()); return; }
+            if (choice == -4) { safe->processor.mapInsertAmount(safe->processor.insertAmountMapping(), !safe->processor.insertAmountIsReversed()); return; }
             if (choice == -2) {
                 processor.unloadNeuralModel();
                 loadModel.setButtonText("LOAD NEURAL MODEL");
@@ -698,8 +688,8 @@ void VoxeraAudioProcessorEditor::drawWorking(juce::Graphics& g, juce::Rectangle<
     auto value = r.removeFromRight(38.0f);
     auto bar = r.reduced(4.0f, 0.0f);
 
-    g.setFont(font(8.5f, true));
-    g.setColour(pink.withAlpha(0.6f));
+    g.setFont(font(12.0f, true));
+    g.setColour(pink.withAlpha(0.9f));
     g.drawText(label, name.toNearestInt(), juce::Justification::centredLeft);
 
     const float filled = juce::jlimit(0.0f, 1.0f, std::abs(db) / fullScaleDb);
@@ -711,171 +701,54 @@ void VoxeraAudioProcessorEditor::drawWorking(juce::Graphics& g, juce::Rectangle<
         g.fillRoundedRectangle(bar.getX(), y, bar.getWidth() * filled, 5.0f, 2.5f);
     }
 
-    g.setFont(font(8.5f));
+    g.setFont(font(12.0f));
     g.setColour(juce::Colour(0xfff6c0e4));
     g.drawText(juce::String(db, 1), value.toNearestInt(), juce::Justification::centredRight);
 }
-void VoxeraAudioProcessorEditor::drawMascot(juce::Graphics& g, juce::Rectangle<float> r)
-{
-    juce::Graphics::ScopedSaveState state(g);
-    g.addTransform(juce::AffineTransform::scale(r.getWidth() / 100.0f, r.getHeight() / 100.0f).translated(r.getX(), r.getY()));
-    g.addTransform(juce::AffineTransform::translation(0.0f, -voiceMotion * 4.0f));
-    juce::Path horns; horns.startNewSubPath(19, 43); horns.quadraticTo(6, 30, 16, 10); horns.quadraticTo(19, 26, 34, 28);
-    horns.lineTo(69, 28); horns.quadraticTo(87, 23, 89, 9); horns.quadraticTo(99, 31, 82, 43); horns.closeSubPath();
-    g.setGradientFill(juce::ColourGradient(juce::Colour(0xffffa8df), 20, 15, juce::Colour(0xffae066b), 80, 85, false));
-    g.fillPath(horns); g.fillEllipse(25, 55, 51, 40); g.fillEllipse(12, 27, 77, 56);
-    const float blinkPhase = std::fmod(animationTime, 5.0f);
-    const float eyeOpen = blinkPhase > 4.76f
-        ? juce::jmax(0.08f, std::abs(blinkPhase - 4.88f) / 0.12f) : 1.0f;
-    g.setColour(ink);
-    g.fillEllipse(25.0f, 57.5f - 11.5f * eyeOpen, 18.0f, 23.0f * eyeOpen);
-    g.fillEllipse(59.0f, 57.5f - 11.5f * eyeOpen, 18.0f, 23.0f * eyeOpen);
-    if (eyeOpen > 0.6f) {
-        g.setColour(juce::Colours::white);
-        g.fillEllipse(29, 48, 5, 6); g.fillEllipse(63, 48, 5, 6);
-    }
-    juce::Path mouth; mouth.startNewSubPath(43, 71); mouth.quadraticTo(49, 78, 54, 71); mouth.quadraticTo(59, 77, 64, 70);
-    g.setColour(ink); g.strokePath(mouth, juce::PathStrokeType(1.8f));
-    g.setColour(pink); g.fillEllipse(25, 82, 21, 13); g.fillEllipse(57, 82, 21, 13);
-}
 void VoxeraAudioProcessorEditor::paint(juce::Graphics& g)
 {
-    g.addTransform(juce::AffineTransform::scale(static_cast<float>(getWidth()) / 1200.0f));
-    g.fillAll(juce::Colour(0xffaaa9a6));
-    juce::ColourGradient chassis(juce::Colour(0xfff3f1ed), 0, 0, juce::Colour(0xff8e8c8a), 1200, 840, false);
-    chassis.addColour(0.42, silver); chassis.addColour(0.48, juce::Colour(0xffe0dedb));
-    g.setGradientFill(chassis); g.fillRoundedRectangle(12, 12, 1176, 816, 30);
-    g.setColour(juce::Colours::white.withAlpha(0.65f)); g.drawRoundedRectangle(16, 16, 1168, 808, 27, 2);
-    for (int y = 20; y < 820; y += 3) {
-        g.setColour(juce::Colours::black.withAlpha(y % 9 == 0 ? 0.026f : 0.012f));
-        g.drawHorizontalLine(y, 25, 1175);
+    g.addTransform(juce::AffineTransform::scale(float(getWidth()) / 1200.0f));
+    g.fillAll(juce::Colour(0xffc9c8c6));
+    g.setColour(ink); g.fillRoundedRectangle(16, 16, 1168, 568, 18);
+    g.setColour(juce::Colour(0xff211a24)); g.fillRoundedRectangle(28, 94, 252, 474, 12);
+    g.setColour(pink); g.setFont(juce::Font(juce::FontOptions(40.0f, juce::Font::bold | juce::Font::italic)));
+    g.drawText("VOXERA", 40, 24, 244, 45, juce::Justification::left);
+    g.setFont(font(13)); g.setColour(silver);
+    g.drawText("YOUR VOICE. YOUR SOUND.",40,69,240,18,juce::Justification::left);
+    drawMeter(g,{878,24,126,54},inPeak,"IN"); drawMeter(g,{1024,24,126,54},outPeak,"OUT");
+    g.setFont(font(20,true)); g.setColour(juce::Colour(0xfff2eaf2));
+    g.drawText("Start with your voice",44,112,220,28,juce::Justification::left);
+    g.setFont(font(13)); g.setColour(silver);
+    g.drawText("Play  >  Listen  >  Make it yours",44,143,220,20,juce::Justification::left);
+    const char* titles[] = {"Tuning & cleanup", "Width, echo & colour", "Compression & analogue colour", "Every control, when you need it", "Adaptive tone correction", "Rhythm & character"};
+    g.setColour(juce::Colour(0xfff2eaf2)); g.setFont(font(18,true));
+    g.drawText(titles[activePage],326,146,820,28,juce::Justification::left);
+    if (activePage==1) {
+        g.setColour(silver); g.setFont(font(14));
+        g.drawText("Add space around the lead. Keep the words in front.",326,207,810,36,juce::Justification::left);
     }
-    g.setColour(ink); g.setFont(font(10));
-    g.drawText("V O C A L   P R O C E S S O R", 70, 28, 420, 22, juce::Justification::left);
-    g.drawText("S I N G   L O U D E R    +    S O U N D   P R E T T I E R", 490, 28, 480, 22, juce::Justification::right);
-    g.setColour(juce::Colour(0xff494548)); g.fillRoundedRectangle(43, 61, 1114, 478, 25);
-    g.setColour(juce::Colour(0xffe7e4df)); g.drawRoundedRectangle(47, 65, 1106, 470, 23, 2);
-    g.setGradientFill(juce::ColourGradient(juce::Colour(0xff230e20), 600, 180, juce::Colour(0xff08070b), 600, 520, false));
-    g.fillRoundedRectangle(63, 79, 1074, 438, 18);
-    drawMeter(g, {95, 103, 130, 62}, inPeak, "IN");
-    drawMeter(g, {1000, 103, 130, 62}, outPeak, "OUT");
-
-    /*  Ten stages now act on the signal, most deciding for themselves how hard
-        to work. Without this row the only way to tell which one is responsible
-        for a sound is to bypass them one at a time.
-
-        The strip sits between the tab row, which ends at y=117, and the logo,
-        which starts at y=153; and between the IN and OUT meters, which own the
-        panel out to x=225 and from x=1000. Everything here has to stay inside
-        those bounds or it lands on top of something.
-    */
-    {
-        // Cells are narrower than their spacing, so each figure has clear air
-        // before the next label rather than running straight into it.
-        const float x0 = 242.0f, w = 140.0f, pitch = 152.0f, y = 124.0f, h = 18.0f;
-        drawWorking(g, {x0,                 y, w, h}, "GATE",    -processor.gateReductionDb(), 40.0f);
-        drawWorking(g, {x0 + pitch,         y, w, h}, "OPT",     -processor.opticalReductionDb(), 12.0f);
-        drawWorking(g, {x0 + 2.0f * pitch,  y, w, h}, "DENS",    processor.densityLiftDb(), 12.0f);
-        drawWorking(g, {x0 + 3.0f * pitch,  y, w, h}, "LIMIT",   -processor.limiterReductionDb(), 6.0f);
-        drawWorking(g, {x0 + 4.0f * pitch,  y, w, h}, "LOCK Hz", processor.lockMudHz(), 700.0f);
-    }
-    if (activePage != 4) {
-    const juce::String logo("VOXERA");
-    g.setFont(juce::Font(juce::FontOptions(110.0f, juce::Font::bold | juce::Font::italic)).withHorizontalScale(1.45f));
-    for (int i = 7; i > 0; --i) {
-        g.setColour(pink.withAlpha(0.02f)); g.drawText(logo, 243 - i, 153 - i, 714 + i * 2, 130 + i * 2, juce::Justification::centred);
-    }
-    g.setColour(pink); g.drawText(logo, 243, 153, 714, 130, juce::Justification::centred);
-    juce::Path orbit; orbit.startNewSubPath(348, 257);
-    orbit.cubicTo(186, 310, 802, 283, 887, 170);
-    g.setColour(pink.withAlpha(0.15f)); g.strokePath(orbit, juce::PathStrokeType(7.0f));
-    g.setColour(pink.withAlpha(0.8f)); g.strokePath(orbit, juce::PathStrokeType(1.4f));
-    if (motion.getToggleState() && !bypass.getToggleState()) {
-        // Follow the existing cubic orbit; no extra timer or path allocation.
-        const float t = std::fmod(animationTime / 6.0f, 1.0f);
-        const float u = 1.0f - t;
-        const juce::Point<float> spark {
-            u*u*u*348.0f + 3.0f*u*u*t*186.0f + 3.0f*u*t*t*802.0f + t*t*t*887.0f,
-            u*u*u*257.0f + 3.0f*u*u*t*310.0f + 3.0f*u*t*t*283.0f + t*t*t*170.0f };
-        const float alpha = std::sin(t * juce::MathConstants<float>::pi);
-        g.setColour(pink.withAlpha(alpha * 0.18f));
-        g.fillEllipse(spark.x - 7.0f, spark.y - 7.0f, 14.0f, 14.0f);
-        g.setColour(juce::Colours::white.withAlpha(alpha * 0.9f));
-        g.fillEllipse(spark.x - 2.0f, spark.y - 2.0f, 4.0f, 4.0f);
-    }
-    juce::Path star; star.startNewSubPath(911, 144); star.quadraticTo(914, 163, 928, 167);
-    star.quadraticTo(914, 169, 911, 185); star.quadraticTo(908, 170, 894, 167);
-    star.quadraticTo(908, 164, 911, 144); star.closeSubPath();
-    g.setColour(pink); g.fillPath(star);
-    juce::Path wave; const int head = processor.scopeHead.load(std::memory_order_relaxed);
-    for (int i = 0; i < 256; ++i) {
-        const float sample = processor.scope[static_cast<size_t>((head + i) % 256)].load(std::memory_order_relaxed);
-        const float x = 95.0f + static_cast<float>(i) * 1010.0f / 255.0f;
-        const float y = 299.0f - juce::jlimit(-1.0f, 1.0f, sample * 2.0f) * 27.0f;
-        if (i == 0) wave.startNewSubPath(x, y); else wave.lineTo(x, y);
-    }
-    g.setColour(pink.withAlpha(0.12f)); g.strokePath(wave, juce::PathStrokeType(5));
-    g.setColour(pink.withAlpha(0.7f)); g.strokePath(wave, juce::PathStrokeType(1));
-    g.setFont(font(11)); g.setColour(juce::Colour(0xfff6c0e4));
-    const float hz = processor.detectedHz();
-    const juce::String readout = processor.pitchConfidence() >= 0.62f && hz > 0.0f
-        ? juce::String(hz, 1) + " Hz  >  " + juce::String(processor.targetHz(), 1) + " Hz     SHIFT " + juce::String(processor.shiftSemitones(), 2) + " st"
-        : "H U M A N   V O I C E   F U R T H E R";
-    g.drawText(readout, 300, 316, 600, 20, juce::Justification::centred);
-    } else {
-        g.setColour(pink); g.setFont(font(20, true));
-        g.drawText("SMART EQ / ADAPTIVE CUTS", 280, 143, 640, 28, juce::Justification::centred);
-        const char* bands[] = {"250 Hz", "500 Hz", "1 kHz", "2 kHz", "4 kHz"};
-        for (size_t b = 0; b < 5; ++b) {
-            const float x = 190.0f + static_cast<float>(b) * 175.0f;
-            const float gain = processor.smartEQGain(b);
-            g.setColour(pink.withAlpha(0.13f)); g.fillRoundedRectangle(x, 189, 120, 86, 5);
-            g.setColour(pink.withAlpha(0.8f));
-            g.fillRoundedRectangle(x, 189, 120, juce::jmax(1.0f, -gain * 86.0f / 6.0f), 5);
-            g.setFont(font(13, true)); g.setColour(juce::Colour(0xfff6c0e4));
-            g.drawText(juce::String(gain, 2) + " dB", static_cast<int>(x), 278, 120, 20, juce::Justification::centred);
-            g.setFont(font(11)); g.drawText(bands[b], static_cast<int>(x), 301, 120, 20, juce::Justification::centred);
-        }
-        g.setFont(font(11)); g.setColour(pink);
-        g.drawText("Raise Amount to enable  /  Linked stereo  /  Shared cut budget", 200, 323, 800, 20, juce::Justification::centred);
-    }
-    if (activePage == 0) {
-        g.setColour(pink.withAlpha(0.8f)); g.setFont(font(11));
-        if (processor.autoMixReport().isEmpty())
-            g.drawText(processor.profileReady.load() ? "PROFILE READY" : "Sing for 8s, then raise Auto Voice", 310, 494, 290, 20, juce::Justification::left);
-
-        /*  Auto Mix moves twenty controls at once. Saying what it concluded, in
-            the same words a mixer would use, is what lets the singer disagree
-            with it rather than guess which knob to undo.
-
-            Only the lines that fit are drawn here. The band below the knobs and
-            above the divider is all the free space this page has, so the full
-            reasoning lives in the button's tooltip instead of being crammed in.
-        */
-        const auto& report = processor.autoMixReport();
-        if (report.isNotEmpty()) {
-            g.setColour(pink.withAlpha(0.10f));
-            g.fillRoundedRectangle(310, 494, 780, 50, 5);
-            g.setFont(font(9.0f));
-            g.setColour(juce::Colour(0xfff6c0e4));
-            juce::StringArray lines;
-            lines.addLines(report);
-            lines.removeEmptyStrings();
-            for (int i = 0; i < juce::jmin(4, lines.size()); ++i)
-                g.drawText(lines[i].trim(), 320, 497 + i * 11, 760, 11, juce::Justification::left);
+    if (activePage==4) {
+        const char* bands[]={"250 Hz","500 Hz","1 kHz","2 kHz","4 kHz"};
+        for (int i=0;i<5;++i) {
+            const float x=326.0f+i*164.0f, gain=processor.smartEQGain(size_t(i));
+            g.setColour(pink.withAlpha(0.12f)); g.fillRoundedRectangle(x,282,138,84,5);
+            g.setColour(pink.withAlpha(0.65f)); g.fillRoundedRectangle(x,282,138,juce::jlimit(1.0f,84.0f,-gain*14),5);
+            g.setColour(silver); g.setFont(font(14));
+            g.drawText(juce::String(bands[i])+"  /  "+juce::String(gain,1)+" dB",int(x),375,146,22,juce::Justification::centred);
         }
     }
-    g.setColour(ink.withAlpha(0.45f)); g.drawHorizontalLine(548, 24, 1176);
-    g.setFont(font(10)); g.setColour(ink);
-    const char* captions[] = {"CORRECTION  0 - 100%", "DARK  /  BRIGHT", "AIR GAIN  dB", "REVERB AMOUNT", "DRY  /  PROCESSED"};
-    for (int i = 0; i < 5; ++i) g.drawText(captions[i], 187 + i * 176, 772, 162, 18, juce::Justification::centred);
-    drawMascot(g, {1070, 527, 100, 100});
-    g.drawText("GOOD", 65, 719, 100, 15, juce::Justification::centred);
-    g.drawText("VOCALS", 65, 735, 100, 15, juce::Justification::centred);
-    g.drawText("ONLY", 65, 751, 100, 15, juce::Justification::centred);
-    g.setColour(ink.withAlpha(0.55f)); g.drawHorizontalLine(801, 45, 1155);
-    g.setFont(font(10)); g.setColour(ink);
-    g.drawText("VOXERA AUDIO LABS", 60, 803, 250, 23, juce::Justification::left);
-    g.drawText("A MORE EXPRESSIVE YOU", 420, 803, 360, 23, juce::Justification::centred);
-    g.drawText("v" JucePlugin_VersionString "  |  CHOP", 880, 803, 265, 23, juce::Justification::right);
+    // Live metering has one quiet, dedicated strip, outside all controls.
+    drawWorking(g,{326,564,146,16},"GATE",-processor.gateReductionDb(),40);
+    drawWorking(g,{492,564,146,16},"COMP",-processor.compressorReductionDb(),12);
+    drawWorking(g,{658,564,146,16},"DE-ESS",-processor.deEssReductionDb(),7);
+    drawWorking(g,{824,564,146,16},"LIMIT",-processor.limiterReductionDb(),6);
+    g.setColour(silver); g.setFont(font(12));
+    const double rate=processor.getSampleRate();
+    g.drawText(juce::String(rate>0 ? processor.reportedLatencySamples()*1000.0/rate : 0.0,1)+" ms",990,562,158,20,juce::Justification::right);
+    const char* captions[]={"PITCH CORRECTION","DARK / BRIGHT","HIGH FREQUENCIES","REVERB","DRY / PROCESSED"};
+    g.setColour(ink.withAlpha(0.7f)); g.setFont(font(12));
+    for (int i=0;i<5;++i) g.drawText(captions[i],55+i*230,773,170,18,juce::Justification::centred);
+    g.setColour(ink.withAlpha(0.18f)); g.drawHorizontalLine(791,40,1160);
+    g.setColour(ink); g.setFont(font(12));
+    g.drawText("HOME STUDIO  /  v" JucePlugin_VersionString,44,798,680,24,juce::Justification::left);
 }

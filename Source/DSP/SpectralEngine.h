@@ -55,6 +55,10 @@ public:
         resonance1.prepare(sr, numChannels);
         resonance2.prepare(sr, numChannels);
         deEsserFilter.prepare(sr, numChannels);
+        deEssDetector.prepare(sr, numChannels);
+        deEssDetector.setHighPass(4500.0);
+        deEssAttack = std::exp(-1.0f / static_cast<float>(sr * 0.002));
+        deEssRelease = std::exp(-1.0f / static_cast<float>(sr * 0.080));
         bodyShelf.prepare(sr, numChannels);
         presenceBell.prepare(sr, numChannels);
         airShelf.prepare(sr, numChannels);
@@ -62,6 +66,10 @@ public:
         resonance1.reset();
         resonance2.reset();
         deEsserFilter.reset();
+        deEssDetector.reset();
+        essWide = essHigh = essGain = 0.0f;
+        essCountdown = 0;
+        deEssReduction.store(0.0f);
         bodyShelf.reset();
         presenceBell.reset();
         airShelf.reset();
@@ -98,6 +106,10 @@ public:
         resonance1.reset();
         resonance2.reset();
         deEsserFilter.reset();
+        deEssDetector.reset();
+        essWide = essHigh = essGain = 0.0f;
+        essCountdown = 0;
+        deEssReduction.store(0.0f);
         bodyShelf.reset();
         presenceBell.reset();
         airShelf.reset();
@@ -194,35 +206,38 @@ public:
         }
     }
 
-    /*  The de-esser, run last of all rather than with the other corrections.
-
-        Sibilance is not only what the singer produced. Saturation, an exciter
-        and a presence lift all make more of it, and every one of those sits
-        downstream of the corrective filters — so a de-esser placed with them
-        smooths the esses that arrived and then hands them to three stages that
-        put the harshness back. The literature is unambiguous about this: the
-        de-esser belongs at the end of the chain precisely so that it catches
-        what the rest of the chain added.
-
-        It stays part of this class because the sibilance measurement it follows
-        comes from the analysis above, and moving the filter somewhere else
-        would mean either duplicating that transform or wiring the score across
-        to a stage that has no other reason to know about it.
-    */
-    void processDeEss(juce::AudioBuffer<float>& buffer)
+    // Detect the actual post-colour signal, with linked channel energies so
+    // opposite stereo polarity cannot hide sibilance. No extra FFT or latency.
+    void processDeEss(juce::AudioBuffer<float>& buffer, juce::AudioBuffer<float>* monitor = nullptr)
     {
-        if (buffer.getNumSamples() == 0) return;
         deEssBlend.setTargetValue(enabled ? 1.0f : 0.0f);
-
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
-        {
-            const float wet = deEssBlend.getNextValue();
-            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-            {
-                auto& output = buffer.getWritePointer(ch)[i];
-                const float dry = output;
-                output = dry + wet * (deEsserFilter.processSample(ch, dry) - dry);
+        for (int i = 0; i < buffer.getNumSamples(); ++i) {
+            float high = 0.0f, wide = 0.0f;
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+                const float x = buffer.getSample(ch, i);
+                const float h = deEssDetector.processSample(ch, x);
+                high = juce::jmax(high, h*h); wide = juce::jmax(wide, x*x);
             }
+            const auto follow = [this](float previous, float target) {
+                const float a = target > previous ? deEssAttack : deEssRelease;
+                return a * previous + (1.0f-a) * target;
+            };
+            essHigh = follow(essHigh, high); essWide = follow(essWide, wide);
+            const float score = essWide > 1.0e-9f
+                ? juce::jlimit(0.0f, 1.0f, (essHigh / (essWide + 1.0e-12f) - 0.12f) / 0.48f) : 0.0f;
+            essGain = follow(essGain, 7.0f * deEssAmount * score);
+            if (essCountdown-- <= 0) {
+                deEsserFilter.setHighShelf(4500.0, -essGain, 0.85);
+                essCountdown = controlInterval - 1;
+            }
+            const float wet = deEssBlend.getNextValue();
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+                auto& x = buffer.getWritePointer(ch)[i];
+                const float removed = wet * (x - deEsserFilter.processSample(ch, x));
+                x -= removed;
+                if (monitor != nullptr) monitor->setSample(ch, i, removed);
+            }
+            deEssReduction.store(essGain * wet, std::memory_order_relaxed);
         }
     }
 
@@ -250,6 +265,7 @@ public:
     std::atomic<float> detectedResonance2Hz { 0.0f };
     std::atomic<float> resonance1Score { 0.0f };
     std::atomic<float> resonance2Score { 0.0f };
+    std::atomic<float> deEssReduction { 0.0f };
     std::atomic<float> sibilanceScore { 0.0f };
     std::atomic<float> detectedSibilanceHz { 7000.0f };
     std::atomic<float> voiceEnergyDb { -120.0f };
@@ -561,17 +577,17 @@ private:
                                          ? detectedResonance2Hz.load()
                                          : 3200.0f);
 
-        const float fs = juce::jlimit(4200.0f, 11000.0f, detectedSibilanceHz.load());
+
 
         // Q rises slightly with detector confidence: strong persistent resonances
         // get narrower, weaker issues get gentler treatment.
         const float q1 = 2.2f + 3.8f * resonance1Score.load();
         const float q2 = 2.0f + 3.2f * resonance2Score.load();
-        const float qS = 1.5f + 1.2f * sibilanceScore.load();
+
 
         resonance1.setPeaking(f1, q1, currentCut1Db);
         resonance2.setPeaking(f2, q2, currentCut2Db);
-        deEsserFilter.setPeaking(fs, qS, currentDeEssDb);
+
     }
 
     int freqToBin(float hz) const noexcept
@@ -625,7 +641,9 @@ private:
 
     Biquad resonance1;
     Biquad resonance2;
-    Biquad deEsserFilter;
+    Biquad deEsserFilter, deEssDetector;
+    float essWide = 0, essHigh = 0, essGain = 0, deEssAttack = 0, deEssRelease = 0;
+    int essCountdown = 0;
     Biquad bodyShelf;
     Biquad presenceBell;
     Biquad airShelf;

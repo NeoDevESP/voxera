@@ -4,6 +4,10 @@ Procesador vocal en C++/JUCE para VST3, Audio Unit y aplicaciÃ³n autÃ³noma. Wind
 
 La idea que lo separa de una cadena vocal al uso: **se adapta a la voz que tiene delante** en lugar de aplicar ajustes universales. El detector de tono y el perfilador de voz que ya lleva alimentan tanto la correcciÃ³n de EQ como el ajuste automÃ¡tico de toda la cadena.
 
+## Home studio
+
+Interfaz organizada alrededor de Auto Mix, con un selector de sonidos iniciales, cinco mandos principales y páginas de voz, efectos, dinámica, Smart EQ, Chop y ajustes avanzados. Consulta la [guía de esta revisión](Docs/HOME_STUDIO.md).
+
 ## La cadena
 
 El orden importa y cada etapa estÃ¡ donde estÃ¡ por una razÃ³n concreta; el cÃ³digo lo explica caso por caso.
@@ -14,10 +18,11 @@ El orden importa y cada etapa estÃ¡ donde estÃ¡ por una razÃ³n concreta; el cÃ³d
 | **Auto Gain** | Nivelado hacia un objetivo. |
 | **Pitch** | CorrecciÃ³n con preservaciÃ³n de formantes (Rubber Band LiveShifter). |
 | **Vocal Lock** | EQ correctiva que **sigue el registro del cantante**: el paso-alto se sitÃºa bajo su nota mÃ¡s grave y el corte de turbidez cerca del segundo armÃ³nico de su tono mediano. |
-| **Spectral** | Motor adaptativo: resonancias, de-esser, cuerpo, presencia y aire. |
+| **Spectral** | Corrección de resonancias; cuerpo, presencia y aire se aplican después de la dinámica. |
 | **Smart EQ** | Cinco bandas correctivas que miden la prominencia sobre el **espectro real** que calcula el motor anterior. |
 | **Character** | Timbre por formante y basculaciÃ³n: Neutral, Bright, Dark, Ghost, Robot, Demon. |
 | **Compresor â†’ Optical â†’ Density â†’ Punch** | Cuatro etapas dinÃ¡micas en distintas escalas de tiempo: picos, sÃ­labas, suelo y paralelo. |
+| **Insert VST3** | Efecto externo después de la dinámica, con estado y latencia propios. |
 | **Neural** | Ejecuta una captura NAM o un modelo RTNeural donde irÃ­a un previo. |
 | **SaturaciÃ³n** | `tanh` con sobremuestreo 4Ã—, mÃ¡s un sesgo que genera armÃ³nicos **pares**. |
 | **Exciter** | Genera aire por elevaciÃ³n al cuadrado de la banda 3,5â€“8 kHz. |
@@ -31,15 +36,17 @@ Escucha ocho segundos y configura la cadena entera. **Y explica por quÃ©**: lee 
 
 `voxera::decide` en `Source/DSP/AutoMix.h` es una funciÃ³n pura del perfil a los ajustes. No es una red neuronal: es un mapeo de reglas, aislado precisamente para poder sustituirse por inferencia de un modelo entrenado sin tocar nada mÃ¡s. Lo que falta para eso no es cÃ³digo sino datos.
 
-En VOCALS, **MIX OPTIONS** ajusta intensidad y bloqueos de afinación, EQ, dinámica y color. **A/B** compara con la configuración anterior y **UNDO MIX** deshace el último Auto Mix. **MATCH LEVEL** iguala RMS de manera aproximada y limitada; deja unos segundos para que se estabilice.
+**MIX OPTIONS** ajusta intensidad y bloqueos de afinación, EQ, dinámica y color. **A/B** compara con la configuración anterior y **UNDO MIX** deshace el último Auto Mix. **MATCH LEVEL** iguala RMS de manera aproximada y limitada; deja unos segundos para que se estabilice.
 
-La captura exige más de dos segundos de señal útil dentro de los ocho de escucha y rechaza una proporción de muestras recortadas del 1 % o superior. Los silencios no se incluyen en el balance medido. El informe distingue la propuesta de lo aplicado.
+La captura exige al menos dos segundos de señal útil dentro de los ocho de escucha y rechaza una proporción de muestras recortadas del 1 % o superior. El informe distingue la propuesta de lo aplicado.
 
 ## Compresores y Sauce
 
-En PRESETS puedes elegir **Clean, FET, VCA, Vari-Mu u Opto** y mover **COMP SAUCE**. Son diseños propios inspirados en familias analógicas. La mezcla paralela, filtro del detector y tiempos están en MORE. Consulta [ingeniería de sonido y referencias](Docs/SOUND_ENGINEERING.md).
+En DYNAMICS puedes elegir **Clean, FET, VCA, Vari-Mu u Opto** y mover **COMP SAUCE**, umbral, ratio, tiempos, Optical y Density. Son diseños propios inspirados en familias analógicas. La mezcla paralela y el filtro del detector están en ADVANCED. Consulta la [ingeniería de sonido y referencias](Docs/SOUND_ENGINEERING.md).
 
-Los presets restablecen el tratamiento sonoro; conservan tonalidad, escala, motor de afinación, ganancias de entrada/salida, Low Latency, bypass, referencias y opciones de Auto Mix. El modelo neuronal permanece cargado, pero su mezcla vuelve a cero.
+Auto Mix conserva los parámetros externos hasta que elijas su control y dirección desde INSERT PLUGIN. Una vez asignado, respeta la intensidad y el bloqueo de dinámica, y sus cambios entran en A/B y Undo.
+
+Los presets conservan tonalidad, escala, motor de afinación, ganancias de entrada/salida, Low Latency, bypass, referencias y opciones de Auto Mix. El modelo neuronal permanece cargado, pero su mezcla vuelve a cero.
 
 ## Modo Low Latency
 

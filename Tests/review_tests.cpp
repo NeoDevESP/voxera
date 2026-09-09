@@ -140,7 +140,38 @@ static void qualityAndMix() {
     std::cout << "PASS signal qualification, Auto Mix locks/intensity/A-B/undo and RMS matching\n";
 }
 
+static void postColourDeEss() {
+    // No upstream analysis: this represents sibilance created by later stages.
+    for (double sr : {44100.0, 48000.0, 96000.0}) {
+        AdaptiveSpectralEngine a, b;
+        a.prepare(sr, 128, 2); b.prepare(sr, 128, 2);
+        a.setDeEss(1); b.setDeEss(1);
+        juce::AudioBuffer<float> x(2,128), y(2,128);
+        for (int n=0; n<500; ++n) {
+            for (int i=0;i<128;++i) {
+                const float v=0.2f*std::sin(float((n*128+i)*2*juce::MathConstants<double>::pi*8000/sr));
+                x.setSample(0,i,v); x.setSample(1,i,v);
+                y.setSample(0,i,v); y.setSample(1,i,-v);
+            }
+            a.processDeEss(x); b.processDeEss(y);
+        }
+        CHECK(a.deEssReduction.load()>4.0f);
+        CHECK(std::abs(a.deEssReduction.load()-b.deEssReduction.load())<0.001f);
+        CHECK(x.getRMSLevel(0,0,128)<0.11f);
+        for (int n=0;n<500;++n) {
+            for(int i=0;i<128;++i) for(int ch=0;ch<2;++ch)
+                x.setSample(ch,i,0.2f*std::sin(float((n*128+i)*2*juce::MathConstants<double>::pi*220/sr)));
+            a.processDeEss(x);
+        }
+        CHECK(a.deEssReduction.load()<0.1f);
+    }
+    voxera::Diagnosis clean; clean.ready=true;
+    CHECK(std::abs(voxera::decide(clean).bodyDb)<0.001f);
+    clean.mud=1; CHECK(voxera::decide(clean).bodyDb < -3.0f);
+    std::cout << "PASS post-colour de-ess detection, stereo polarity, voice-body preservation\n";
+}
+
 int main() {
     juce::ScopedJuceInitialiser_GUI init;
-    captureTiming(); stateAndPresets(); compression(); qualityAndMix();
+    captureTiming(); stateAndPresets(); compression(); qualityAndMix(); postColourDeEss();
 }

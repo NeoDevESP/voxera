@@ -123,38 +123,25 @@ inline MixSettings decide(const Diagnosis& d)
     const float mud = d.mud, hollow = d.hollow, dull = d.dull, harsh = d.harsh;
     const float dynamics = d.dynamics, tonal = d.tonal, range = d.range;
 
-    settings.clean         = 30.0f + 55.0f * mud;
-    settings.bodyDb        = -2.5f - 3.5f * mud;
+    settings.clean         = 15.0f + 60.0f * mud;
+    settings.bodyDb        = -5.0f * mud;
     settings.presenceDb    = 3.5f * hollow;
     settings.airDb         = 5.0f * dull - 2.0f * harsh;
     settings.deEss         = 30.0f + 55.0f * harsh;
-    settings.smartEQAmount = 20.0f + 40.0f * mud;
+    settings.smartEQAmount = 10.0f + 50.0f * mud;
     // Worth leaning on for a muddy take, since the whole point of that stage is
     // to put the cut where this singer's boxiness actually is.
-    /*  Aimed at what a finished commercial vocal measures, not at a range
-        that felt reasonable.
-
-        Rendering the same take through this chain and through a released
-        reference, band by band, said two things that these numbers had wrong.
-        The reference carried 28 per cent of its energy below 250 Hz where our
-        output left between 44 and 52; and it held a crest of 17.6 dB where
-        ours ran down to single figures.
-
-        So the cleanup starts high and goes higher, and the ratio starts low
-        and stays low. A home recording is close-miked in an untreated room —
-        the low end is where its problems live, and it is almost never where
-        its character lives.
-    */
-    settings.vocalLock     = 75.0f + 25.0f * mud;
+    // Preserve natural body on clean takes; room/proximity correction follows measured mud.
+    settings.vocalLock     = 20.0f + 70.0f * mud;
 
     settings.compThreshold = -12.0f - 12.0f * dynamics;
     settings.compRatio     = 1.8f + 1.7f * dynamics;
-    settings.optical       = 25.0f + 40.0f * dynamics;
+    settings.optical       = 10.0f + 40.0f * dynamics;
     // The wider the take's own range, the more of it is sitting below where a
     // listener can follow it under a track, and the more there is to raise.
-    settings.density       = 30.0f + 45.0f * dynamics;
-    settings.punch         = 20.0f + 50.0f * dynamics;
-    settings.clipAmount    = 10.0f + 20.0f * dynamics;
+    settings.density       = 10.0f + 40.0f * dynamics;
+    settings.punch         = 10.0f + 40.0f * dynamics;
+    settings.clipAmount    = 15.0f * dynamics;
 
     /*  The gate is placed relative to the voice rather than at a fixed level.
         Thirty-five dB below the take's own average sits under any sung or spoken

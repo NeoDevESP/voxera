@@ -42,13 +42,14 @@ struct Tilt
         highCoeff = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 4000.0f / static_cast<float>(sampleRate));
     }
 
-    void add(float x)
+    void add(float x, bool measure = true)
     {
         lowState += lowCoeff * (x - lowState);
         highState += highCoeff * (x - highState);
         const float low = lowState;
         const float high = x - highState;
         const float mid = x - low - high;
+        if (!measure) return;
         lowEnergy += low * low;
         midEnergy += mid * mid;
         highEnergy += high * high;
@@ -133,26 +134,44 @@ int main(int argc, char** argv)
         std::unique_ptr<juce::AudioFormatReader> b(formats.createReaderFor(compareWith));
         if (a == nullptr || b == nullptr) { std::cerr << "could not read both files" << std::endl; return 1; }
 
+        if (a->sampleRate != b->sampleRate) {
+            std::cerr << "Comparison requires matching sample rates; resample both files first.\n"; return 1;
+        }
         const int shortest = static_cast<int>(juce::jmin(a->lengthInSamples, b->lengthInSamples));
         const double rateA = a->sampleRate;
 
-        const auto study = [&](juce::AudioFormatReader& reader) {
-            juce::AudioBuffer<float> buffer(juce::jmax(1, static_cast<int>(reader.numChannels)), shortest);
-            reader.read(&buffer, 0, shortest, 0, true, buffer.getNumChannels() > 1);
-            Tilt tilt; tilt.prepare(reader.sampleRate);
-            double sum = 0.0; float peak = 0.0f; int count = 0;
-            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-                for (int i = 0; i < shortest; ++i) {
-                    const float v = buffer.getSample(ch, i);
-                    tilt.add(v); sum += static_cast<double>(v) * v;
-                    peak = juce::jmax(peak, std::abs(v)); ++count;
+        juce::AudioBuffer<float> audioA(int(a->numChannels), shortest), audioB(int(b->numChannels), shortest);
+        a->read(&audioA, 0, shortest, 0, true, audioA.getNumChannels()>1);
+        b->read(&audioB, 0, shortest, 0, true, audioB.getNumChannels()>1);
+        const int window = juce::jmax(1, int(rateA * 0.020));
+        std::vector<bool> active(size_t((shortest+window-1)/window), false);
+        int activeSamples=0;
+        for (int at=0;at<shortest;at+=window) {
+            const int n=juce::jmin(window,shortest-at);
+            float energy=0;
+            for (const auto* buffer : {&audioA,&audioB})
+                for(int ch=0;ch<buffer->getNumChannels();++ch)
+                    energy=juce::jmax(energy,buffer->getRMSLevel(ch,at,n));
+            const bool voiced=energy>juce::Decibels::decibelsToGain(-55.0f);
+            active[size_t(at/window)]=voiced;
+            if(voiced) activeSamples+=n;
+        }
+        if(activeSamples==0) { std::cerr << "No active audio above -55 dBFS\n"; return 1; }
+        const auto study = [&](const juce::AudioBuffer<float>& buffer) {
+            Tilt tilt; tilt.prepare(rateA);
+            double sum=0; float peak=0; int count=0;
+            for(int ch=0;ch<buffer.getNumChannels();++ch) {
+                tilt.lowState=tilt.highState=0;
+                for(int i=0;i<shortest;++i) {
+                    const float v=buffer.getSample(ch,i); const bool measure=active[size_t(i/window)];
+                    tilt.add(v,measure);
+                    if(measure) { sum+=double(v)*v; peak=juce::jmax(peak,std::abs(v)); ++count; }
                 }
-            const float rms = static_cast<float>(std::sqrt(sum / juce::jmax(1, count)));
-            return std::make_tuple(peak, rms, tilt);
+            }
+            return std::make_tuple(peak,float(std::sqrt(sum/juce::jmax(1,count))),tilt);
         };
-
-        const auto [peakA, rmsA, tiltA] = study(*a);
-        const auto [peakB, rmsB, tiltB] = study(*b);
+        const auto [peakA,rmsA,tiltA]=study(audioA);
+        const auto [peakB,rmsB,tiltB]=study(audioB);
 
         std::cout << std::fixed << std::setprecision(2);
         std::cout << std::endl << "A  " << input.getFileName() << std::endl
@@ -168,6 +187,8 @@ int main(int argc, char** argv)
                   << "   B " << (decibels(peakB) - decibels(rmsB))
                   << "   difference " << ((decibels(peakB) - decibels(rmsB)) - (decibels(peakA) - decibels(rmsA)))
                   << " dB" << std::endl << std::endl;
+        std::cout << "  shared active audio: " << activeSamples/rateA << " s; RMS trim for B to match A: "
+                  << decibels(rmsA)-decibels(rmsB) << " dB (not LUFS)\n";
         tiltA.report("A");
         tiltB.report("B");
         std::cout << std::endl;
@@ -185,6 +206,7 @@ int main(int argc, char** argv)
     reader->read(&dry, 0, length, 0, true, channels > 1);
 
     VoxeraAudioProcessor processor;
+    processor.setNonRealtime(true);
     if (preset.isNotEmpty()) {
         for (int i = 0; i < VoxeraAudioProcessor::numFactoryPresets; ++i)
             if (processor.getProgramName(i).equalsIgnoreCase(preset)) processor.applyFactoryPreset(i);

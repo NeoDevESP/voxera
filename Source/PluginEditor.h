@@ -46,7 +46,6 @@ private:
     // Compact horizontal bar for one stage's gain change, so it is visible at a
     // glance which of the ten stages is actually doing something.
     void drawWorking(juce::Graphics&, juce::Rectangle<float>, const juce::String&, float, float);
-    void drawMascot(juce::Graphics&, juce::Rectangle<float>);
     VoxeraAudioProcessor& processor;
     VoxeraLookAndFeel theme;
     juce::TooltipWindow tooltips { this, 600 };
@@ -77,11 +76,14 @@ private:
     void showInsertWindow();
     void closeInsertWindow();
     juce::TextButton insertButton { "INSERT PLUGIN" };
+    std::shared_ptr<juce::AudioPluginInstance> hostedLease;
     std::unique_ptr<juce::DocumentWindow> insertWindow;
+    juce::TextButton listenEss { "HOLD: HEAR ESSES" };
+    juce::ComboBox presetPicker;
+    juce::TextEditor mixReport;
     void applyNeuralModel(const juce::File&);
     juce::TextButton bypass { "BYPASS" };
     juce::TextButton lowLatency { "LOW LATENCY" };
-    juce::TextButton motion { "MOTION ON" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> lowLatencyAttachment;
     juce::Viewport advancedViewport;
@@ -90,8 +92,6 @@ private:
     int activePage = 0;
     float inPeak = -120.0f, outPeak = -120.0f;
     // Presentation state belongs to the message thread, never the audio path.
-    double lastAnimationTime = 0.0;
-    float animationTime = 0.0f, voiceMotion = 0.0f;
 #if VOXERA_WITH_INSPECTOR
     // Opened with the I key. Holds a reference to this editor, so it has to be
     // declared last and destroyed first.

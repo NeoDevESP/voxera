@@ -98,9 +98,9 @@ public:
 
     /*  The insert slot: somebody else's compressor or EQ, inside this chain.
 
-        Loading suspends audio, because the pointer the audio thread follows has
-        to stop being read before the instance behind it is destroyed, and
-        because instantiating a licensed plugin can take seconds.
+        The new instance and dry-delay storage are prepared before publication.
+        The callback lock protects publication; editor leases keep outgoing
+        instances alive until their windows have been destroyed.
     */
     voxera::PluginSlot::LoadResult loadInsertPlugin(const juce::File& file);
     void unloadInsertPlugin();
@@ -113,6 +113,12 @@ public:
     void setInsertParameter(int index, float normalised) { insertSlot.setParameter(index, normalised); }
     int findInsertParameter(const juce::StringArray& words) const { return insertSlot.findParameter(words); }
     juce::AudioProcessorEditor* createInsertEditor() { return insertSlot.createHostedEditor(); }
+    std::shared_ptr<juce::AudioPluginInstance> insertEditorLease() const { const juce::ScopedLock lock(getCallbackLock()); return insertSlot.editorLease(); }
+    void mapInsertAmount(int index, bool decreases) { insertAmountParameter = index; insertAmountDecreases = decreases; }
+    int insertAmountMapping() const { return insertAmountParameter; }
+    bool insertAmountIsReversed() const { return insertAmountDecreases; }
+    std::atomic<bool> listenDeEss { false };
+    float deEssReductionDb() const { return spectralEngine.deEssReduction.load(); }
     bool insertHasEditor() const noexcept { return insertSlot.hasHostedEditor(); }
     static juce::Array<juce::File> installedPluginFolders();
 
@@ -278,7 +284,7 @@ private:
     // The parts the figure is rebuilt from when the insert slot changes.
     int baseFixedLatency = 0, widestPitchLatency = 0;
     // announceNow: synchronous inside prepareToPlay, deferred anywhere else.
-    void republishLatency(bool announceNow = false);
+    void republishLatency(bool announceNow = false, bool allocateDry = true);
     std::atomic<int> activeLatencySamples { 0 };
     std::atomic<bool> latencyChangePending { false };
     bool shifterBypassed = false;
@@ -319,7 +325,8 @@ private:
     std::atomic<bool> autoMixRequested { false };
     std::atomic<bool> referenceRequested { false };
     voxera::IntegerDelay dryDelay;
-    juce::AudioBuffer<float> dryBuffer;
+    juce::AudioBuffer<float> dryBuffer, deEssMonitorBuffer;
+    juce::SmoothedValue<float> deEssMonitorBlend;
     juce::SmoothedValue<float> globalWet;
     int preparedBlockSize = 1, scopeDecimation = 0, scopeWrite = 0;
     int currentProgram = 0;
@@ -349,6 +356,9 @@ private:
     voxera::Limiter limiter;
 
     std::vector<std::pair<juce::String, float>> autoMixBefore, autoMixAfter;
+    int insertAmountParameter = -1, autoMixInsertIndex = -1;
+    bool insertAmountDecreases = false;
+    float autoMixInsertBefore = 0, autoMixInsertAfter = 0;
     bool comparingBefore = false;
     std::atomic<bool> autoMixHistoryValid { false };
     std::atomic<bool> autoMixComplete { false };
