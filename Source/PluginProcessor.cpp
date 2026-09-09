@@ -291,10 +291,29 @@ voxera::PluginSlot::LoadResult VoxeraAudioProcessor::loadInsertPlugin(const juce
 
     const double session = getSampleRate() > 0.0 ? getSampleRate() : 48000.0;
 
-    suspendProcessing(true);
-    insertSlot.commitLoad();
+    /*  The swap happens under the lock the host holds around processBlock.
+
+        This was the crash, and it only ever showed when REPLACING a plugin,
+        because that is the only case with an old instance to destroy.
+        suspendProcessing raises a flag; it does not wait for a processBlock
+        already running to come back. So the audio thread could still be inside
+        the outgoing plugin at the moment the message thread deleted it.
+
+        Taking the callback lock is the guarantee that flag never was: JUCE's
+        wrappers hold it around every processBlock, so acquiring it here means
+        the audio thread is certainly outside. Nothing inside the lock does any
+        work beyond exchanging pointers — the buffer was allocated during load,
+        and the outgoing plugin is set aside rather than destroyed.
+    */
+    {
+        const juce::ScopedLock audioStopped(getCallbackLock());
+        insertSlot.commitLoad();
+    }
+
+    // Outside the lock: preparing allocates, and shutting a licensed plugin
+    // down can take long enough to be heard if audio is waiting on it.
     insertSlot.prepare(session, preparedBlockSize, getTotalNumOutputChannels());
-    suspendProcessing(false);
+    insertSlot.releaseRetired();
 
     republishLatency();
     if (result.latencySamples > 0)
@@ -304,9 +323,11 @@ voxera::PluginSlot::LoadResult VoxeraAudioProcessor::loadInsertPlugin(const juce
 
 void VoxeraAudioProcessor::unloadInsertPlugin()
 {
-    suspendProcessing(true);
-    insertSlot.unload();
-    suspendProcessing(false);
+    {
+        const juce::ScopedLock audioStopped(getCallbackLock());
+        insertSlot.unload();
+    }
+    insertSlot.releaseRetired();
     republishLatency();
 }
 

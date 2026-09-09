@@ -2,6 +2,7 @@
 #include <JuceHeader.h>
 #include <atomic>
 #include <memory>
+#include <utility>
 
 namespace voxera
 {
@@ -108,6 +109,15 @@ public:
             result.message = "That plugin would not give a usable output bus.";
             return result;
         }
+
+        /*  The new buffer is allocated here, while nothing is holding the audio
+            thread, so the swap below has nothing left to do but exchange
+            pointers.
+        */
+        const int wide = juce::jmax(2, instance->getTotalNumInputChannels(),
+                                       instance->getTotalNumOutputChannels());
+        pendingScratch.setSize(wide, juce::jmax(capacity, 1), false, true, true);
+
         pending = std::move(instance);
         pendingName = found.getFirst()->name;
         pendingFile = file;
@@ -121,21 +131,35 @@ public:
     // Called with audio stopped, so the previous instance is safe to release.
     void commitLoad()
     {
-        /*  The scratch buffer is resized here and not while loading.
+        /*  The swap, and nothing but the swap.
 
-            It is the buffer the audio thread reads every block, so growing it
-            reallocates memory that thread may be inside. Loading happens with
-            audio running — deliberately, since instantiating a licensed plugin
-            can take seconds and suspending across that would stall the session
-            — which makes this the only safe place for it.
+            This is called while the caller holds the lock the host uses around
+            processBlock, so every line of it runs with the audio thread
+            certainly outside this object. That is also why there is no work
+            here beyond exchanging pointers: the buffer was allocated during
+            load, and the plugin being replaced is set aside rather than
+            destroyed, because tearing down a VST3 can take long enough to be
+            heard if it happens while audio is waiting.
         */
+        retired = std::move(current);
         active.store(pending.get(), std::memory_order_release);
         current = std::move(pending);
-        if (current != nullptr) sizeScratch(*current);
+        // std::swap on the buffers themselves: AudioBuffer has no swap of its
+        // own, and moving is what makes this free rather than a reallocation.
+        std::swap(scratch, pendingScratch);
         loadedName = pendingName;
         loadedFile = pendingFile;
         hostedLatency = current != nullptr ? current->getLatencySamples() : 0;
     }
+
+    /*  Destroys whatever the last swap set aside. Message thread, no lock.
+
+        Kept separate so that the instance being replaced is released after the
+        audio thread has been let go, not while it is waiting: a licensed plugin
+        can take a noticeable moment to shut down, and doing that inside the
+        callback lock would put that moment straight into the audio.
+    */
+    void releaseRetired() { retired.reset(); }
 
     void unload()
     {
@@ -148,7 +172,8 @@ public:
             in this project does exactly that before calling here.
         */
         active.store(nullptr, std::memory_order_release);
-        current.reset();
+        // Set aside rather than destroyed here, for the same reason as above.
+        retired = std::move(current);
         pending.reset();
         loadedName = {};
         loadedFile = {};
@@ -421,8 +446,8 @@ private:
 
     juce::AudioPluginFormatManager formats;
     std::atomic<juce::AudioPluginInstance*> active { nullptr };
-    std::unique_ptr<juce::AudioPluginInstance> current, pending;
-    juce::AudioBuffer<float> scratch;
+    std::unique_ptr<juce::AudioPluginInstance> current, pending, retired;
+    juce::AudioBuffer<float> scratch, pendingScratch;
     juce::MidiBuffer hostedMidi;
     juce::SmoothedValue<float> mix;
 

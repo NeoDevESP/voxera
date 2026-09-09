@@ -1,6 +1,8 @@
 #include "../Source/PluginProcessor.h"
 #include "Checks.h"
 #include <chrono>
+#include <thread>
+#include <atomic>
 #include <iostream>
 
 void set(VoxeraAudioProcessor& p, const char* id, float value) {
@@ -954,6 +956,72 @@ int main(int argc, char** argv)
                 std::cout << "     refused: " << loaded.message << "\n";
             }
             }
+        }
+    }
+
+    /*  Swapping the insert plugin while audio is running.
+
+        This is the case that crashed FL Studio, and it crashed only when
+        REPLACING a plugin because that is the only time there is an old
+        instance to destroy. The audio thread could still be inside it.
+
+        Reproduced here by keeping a thread calling processBlock throughout,
+        the way a host does, while the message thread loads one plugin after
+        another.
+
+        Worth being straight about what this proves. Removing the callback lock
+        and running it again does NOT make it fail: the window is narrow, and
+        the outgoing plugin is set aside rather than destroyed at the swap,
+        which widens the gap on its own. So this exercises the path and would
+        catch a gross fault, and it is not evidence that the race is gone. The
+        argument for that is the lock itself, which is the mechanism the format
+        wrapper documents for exactly this.
+
+        Skipped when the machine has nothing to load, so the suite stays honest
+        on a checkout with no plugins installed rather than passing vacuously.
+    */
+    {
+        juce::Array<juce::File> candidates;
+        for (const auto& folder : VoxeraAudioProcessor::installedPluginFolders())
+            folder.findChildFiles(candidates, juce::File::findFilesAndDirectories, false, "*.vst3");
+        candidates.removeIf([](const juce::File& f) { return f.getFileName().startsWithIgnoreCase("VOXERA"); });
+
+        if (candidates.size() < 2) {
+            std::cout << "INSERT swap: fewer than two VST3s installed, skipping" << std::endl;
+        } else {
+            VoxeraAudioProcessor host;
+            host.prepareToPlay(48000.0, 128);
+
+            std::atomic<bool> running { true };
+            std::atomic<int> blocks { 0 };
+            std::thread audio([&] {
+                juce::AudioBuffer<float> b(2, 128);
+                juce::MidiBuffer none;
+                while (running.load()) {
+                    for (int ch = 0; ch < 2; ++ch)
+                        for (int i = 0; i < 128; ++i)
+                            b.setSample(ch, i, 0.2f * std::sin(static_cast<float>(i) * 0.05f));
+                    host.processBlock(b, none);
+                    ++blocks;
+                    for (int ch = 0; ch < 2; ++ch)
+                        for (int i = 0; i < 128; ++i) CHECK(std::isfinite(b.getSample(ch, i)));
+                }
+            });
+
+            int loaded = 0;
+            for (int round = 0; round < juce::jmin(6, candidates.size()); ++round) {
+                const auto result = host.loadInsertPlugin(candidates[round]);
+                if (result.ok) ++loaded;
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            }
+            host.unloadInsertPlugin();
+
+            running.store(false);
+            audio.join();
+
+            std::cout << "INSERT swap: " << loaded << " plugins swapped in while "
+                      << blocks.load() << " blocks were processing" << std::endl;
+            CHECK(blocks.load() > 0);
         }
     }
 
