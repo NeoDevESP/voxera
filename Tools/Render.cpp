@@ -88,6 +88,7 @@ int main(int argc, char** argv)
     bool autoMix = false;
     juce::String insert;
     bool listInsert = false;
+    bool audit = false;
     juce::File compareWith;
     juce::StringPairArray insertSets;
     juce::StringPairArray overrides;
@@ -100,6 +101,7 @@ int main(int argc, char** argv)
         else if (argument == "--auto-mix") autoMix = true;
         else if (argument == "--insert" && i + 1 < argc) insert = argv[++i];
         else if (argument == "--insert-list") listInsert = true;
+        else if (argument == "--audit") audit = true;
         else if (argument == "--compare" && i + 1 < argc)
             compareWith = juce::File::getCurrentWorkingDirectory().getChildFile(argv[++i]);
         else if (argument == "--insert-set" && i + 1 < argc) {
@@ -129,6 +131,154 @@ int main(int argc, char** argv)
         same take start at the same sample or they do not, and pretending
         otherwise would produce confident numbers about the wrong thing.
     */
+    /*  Does every control actually do something?
+
+        The exciter looked broken because it was: moving it end to end changed
+        the signal by 0.16 dB, which is not a subtle effect but no effect. It
+        had passed its own unit test the whole time, on a synthetic signal
+        built to make it pass.
+
+        So rather than trust that once, this asks the question of every
+        parameter at once. Each one is moved to an extreme, the take is
+        rendered again, and the result is compared against the untouched
+        render. A control that changes nothing measurable is either broken,
+        unreachable, or does nothing on this material — and all three are worth
+        knowing before somebody reaches for it.
+
+        Reported and never asserted on. Plenty of controls legitimately do
+        nothing on a given take: a de-esser has no work on a take with no
+        sibilance, and a key setting does nothing while tuning is off. The
+        output is a list to read, not a verdict.
+    */
+    if (audit) {
+        std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(input));
+        if (reader == nullptr) { std::cerr << "not a readable audio file" << std::endl; return 1; }
+
+        const double rate = reader->sampleRate;
+        const int channels = juce::jlimit(1, 2, static_cast<int>(reader->numChannels));
+        /*  The loudest few seconds, not the first few.
+
+            A few seconds is plenty and keeps a sweep of seventy parameters to
+            something a person will wait for — but taking them from the start of
+            the file is what this tool got wrong on its first run. Recordings
+            begin with silence, and over silence nothing changes anything, so it
+            reported a working limiter and a working modulation as doing
+            nothing at all. A tool that answers "does this control do something"
+            has to be pointed at a moment where there is something to do it to.
+        */
+        const int whole = static_cast<int>(reader->lengthInSamples);
+        const int length = juce::jmin(whole, static_cast<int>(rate * 6.0));
+        juce::AudioBuffer<float> everything(channels, whole);
+        reader->read(&everything, 0, whole, 0, true, channels > 1);
+
+        int loudestAt = 0;
+        double loudest = -1.0;
+        for (int at = 0; at + length <= whole; at += juce::jmax(1, length / 4)) {
+            double sum = 0.0;
+            for (int ch = 0; ch < channels; ++ch)
+                for (int i = at; i < at + length; i += 16) {
+                    const double v = everything.getSample(ch, i);
+                    sum += v * v;
+                }
+            if (sum > loudest) { loudest = sum; loudestAt = at; }
+        }
+
+        juce::AudioBuffer<float> source(channels, length);
+        for (int ch = 0; ch < channels; ++ch)
+            source.copyFrom(ch, 0, everything, ch, loudestAt, length);
+
+        constexpr int block = 128;
+        juce::MidiBuffer midi;
+
+        const auto renderWith = [&](const juce::String& id, float value) {
+            VoxeraAudioProcessor p;
+            if (id.isNotEmpty())
+                if (auto* parameter = p.apvts.getParameter(id))
+                    parameter->setValueNotifyingHost(parameter->convertTo0to1(value));
+            p.prepareToPlay(rate, block);
+            juce::AudioBuffer<float> work(channels, length);
+            work.makeCopyOf(source);
+            for (int at = 0; at < length; at += block) {
+                const int piece = juce::jmin(block, length - at);
+                juce::AudioBuffer<float> slice(work.getArrayOfWritePointers(), channels, at, piece);
+                p.processBlock(slice, midi);
+            }
+            return work;
+        };
+
+        const auto reference = renderWith({}, 0.0f);
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << std::endl << "Sweeping every control on " << input.getFileName()
+                  << " (" << (length / rate) << " s from " << (loudestAt / rate)
+                  << " s, the loudest stretch)" << std::endl << std::endl;
+
+        VoxeraAudioProcessor probe;
+        juce::StringArray silent;
+
+        for (auto* raw : probe.getParameters()) {
+            auto* parameter = dynamic_cast<juce::RangedAudioParameter*>(raw);
+            if (parameter == nullptr) continue;
+            const auto id = parameter->paramID;
+            // Modes and actions rather than sound controls, and the one that
+            // starts an eight-second listen if you touch it.
+            if (id == "bypass" || id == "analyzeVoice" || id == "autoVoice"
+                || id == "levelMatch" || id == "lowLatency") continue;
+
+            const auto range = parameter->getNormalisableRange();
+            const float here = parameter->convertFrom0to1(parameter->getValue());
+            // Whichever end is further from where it sits now, so a control
+            // already at one extreme is still moved.
+            const float target = std::abs(range.end - here) > std::abs(here - range.start)
+                               ? range.end : range.start;
+
+            const auto moved = renderWith(id, target);
+            float widest = 0.0f;
+            for (int ch = 0; ch < channels; ++ch)
+                for (int i = 0; i < length; ++i)
+                    widest = juce::jmax(widest, std::abs(moved.getSample(ch, i)
+                                                       - reference.getSample(ch, i)));
+
+            /*  Why a control was expected to do nothing, where that is known.
+
+                Most silent controls here are silent for a good reason: they
+                depend on something that is switched off, or they act only while
+                Auto Mix runs. Printing the list without saying so leaves
+                whoever reads it to work out fifteen explanations, and the one
+                entry that matters gets lost among the fourteen that do not.
+            */
+            const auto expected = [&]() -> juce::String {
+                if (id == "pitchKey" || id == "pitchScale")
+                    return "chromatic scale ignores the key";
+                if (id.startsWith("chop") && id != "chopAmount")  return "chop amount is zero";
+                if (id == "crushMix")                              return "crush is zero";
+                if (id.startsWith("mod") && id != "modType")       return "mod type is Off";
+                if (id == "modType")                               return "mod mix is zero";
+                if (id == "neuralMix")                             return "no capture loaded";
+                if (id == "voiceMatch")                            return "no reference learned";
+                if (id.startsWith("autoMix"))                      return "only acts while Auto Mix runs";
+                if (id == "limiterOn" || id == "limiterCeiling")
+                    return "nothing reaches the ceiling on this take";
+                return {};
+            }();
+
+            const float db = juce::Decibels::gainToDecibels(widest, -120.0f);
+            std::cout << "  " << id.paddedRight(' ', 18)
+                      << juce::String(here, 1).paddedLeft(' ', 8) << " -> "
+                      << juce::String(target, 1).paddedLeft(' ', 8)
+                      << "   difference " << juce::String(db, 1).paddedLeft(' ', 7) << " dB"
+                      << (db < -80.0f ? (expected.isEmpty() ? "   NOTHING"
+                                                             : "   nothing, expected: " + expected)
+                                       : juce::String()) << std::endl;
+            // Only the unexplained ones are worth carrying to the summary.
+            if (db < -80.0f && expected.isEmpty()) silent.add(id);
+        }
+
+        std::cout << std::endl << silent.size() << " controls changed nothing without a reason";
+        if (!silent.isEmpty()) std::cout << ": " << silent.joinIntoString(", ");
+        std::cout << std::endl << std::endl;
+        return 0;
+    }
+
     if (compareWith != juce::File()) {
         std::unique_ptr<juce::AudioFormatReader> a(formats.createReaderFor(input));
         std::unique_ptr<juce::AudioFormatReader> b(formats.createReaderFor(compareWith));
