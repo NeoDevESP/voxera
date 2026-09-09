@@ -426,10 +426,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxeraAudioProcessor::create
         group("spectral", "Spectral",
             toggle(ParamIDs::spectralOn, "Adaptive Spectral Engine", true),
             number(ParamIDs::clean, "Clean", { 0.0f, 100.0f, 0.1f }, 55.0f),
-            number(ParamIDs::bodyDb, "Body", { -6.0f, 6.0f, 0.1f }, 0.0f),
+            number(ParamIDs::bodyDb, "Body", { -6.0f, 6.0f, 0.1f }, -2.0f),
             number(ParamIDs::presenceDb, "Presence", { -6.0f, 6.0f, 0.1f }, 0.0f),
             number(ParamIDs::deEss, "De-Ess", { 0.0f, 100.0f, 0.1f }, 55.0f),
-            number(ParamIDs::airDb, "Air", { -8.0f, 8.0f, 0.1f }, 0.0f)),
+            number(ParamIDs::airDb, "Air", { -8.0f, 8.0f, 0.1f }, 2.0f)),
 
         group("dynamics", "Dynamics",
             number(ParamIDs::compThreshold, "Comp Threshold", { -48.0f, 0.0f, 0.1f }, -18.0f),
@@ -461,7 +461,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxeraAudioProcessor::create
             toggle(ParamIDs::bypass, "Bypass", false)),
 
         group("smarteq", "Smart EQ",
-            number(ParamIDs::smartEQAmount, "Smart EQ Amount", { 0.0f, 100.0f, 0.1f }, 0.0f),
+            number(ParamIDs::smartEQAmount, "Smart EQ Amount", { 0.0f, 100.0f, 0.1f }, 35.0f),
             number(ParamIDs::smartEQRange, "Smart EQ Budget dB", { 1.0f, 6.0f, 0.1f }, 3.0f),
             number(ParamIDs::smartEQResponse, "Smart EQ Response ms", { 100.0f, 1000.0f, 1.0f }, 250.0f)),
 
@@ -490,7 +490,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxeraAudioProcessor::create
             number(ParamIDs::density, "Density", { 0.0f, 100.0f, 0.1f }, 0.0f)),
 
         group("lock", "Vocal Lock",
-            number(ParamIDs::vocalLock, "Vocal Lock", { 0.0f, 100.0f, 0.1f }, 0.0f)),
+            number(ParamIDs::vocalLock, "Vocal Lock", { 0.0f, 100.0f, 0.1f }, 60.0f)),
 
         group("tone", "Tone",
             number(ParamIDs::satWarmth, "Warmth", { 0.0f, 100.0f, 0.1f }, 0.0f),
@@ -1473,6 +1473,24 @@ void VoxeraAudioProcessor::applyFactoryPreset(int index)
         error. Every preset drives the whole chain rather than a corner of it:
         a preset that leaves the density, optical and clip stages at zero is
         heard as the plugin sounding thin, whatever the rest is doing.
+    */
+    /*  What the plugin does before anybody touches it.
+
+        These four used to sit at zero, which meant a fresh instance
+        compressed, saturated and added space while doing none of the
+        corrective work — and corrective work is the part a home recording
+        actually needs. A close cardioid in an untreated room arrives with
+        proximity in the low end, room resonances in the mids and no air, and
+        those are precisely the three the defaults were leaving switched off.
+
+        Measured against a finished commercial vocal, the untouched plugin sat
+        at 46 per cent of its energy below 250 Hz where the reference had 28,
+        and had no top octave at all where the reference had two per cent.
+
+        The values are deliberately modest and all four are adaptive or gentle:
+        the point is that opening the plugin on a home recording should already
+        be an improvement, not that it should make a decision the person cannot
+        hear or undo.
     */
     static constexpr int numPresetValues = 30;
     static constexpr const char* ids[numPresetValues] = {

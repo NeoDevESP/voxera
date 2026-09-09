@@ -1076,9 +1076,22 @@ int main(int argc, char** argv)
     auto legacyXml = legacy.createXml(); juce::MemoryBlock legacyData;
     juce::AudioProcessor::copyXmlToBinary(*legacyXml, legacyData);
     restored.setStateInformation(legacyData.getData(), static_cast<int>(legacyData.getSize()));
-    CHECK(restored.apvts.getRawParameterValue("smartEQAmount")->load() == 0);
-    CHECK(restored.apvts.getRawParameterValue("smartEQRange")->load() == 3);
-    CHECK(restored.apvts.getRawParameterValue("smartEQResponse")->load() == 250);
+    /*  Compared against the defaults the parameters declare, not against
+        numbers copied here.
+
+        What this test is for is that a session written before a parameter
+        existed comes back with that parameter at its default. Writing the
+        default out again as a literal makes the test fail the moment anyone
+        changes one for a good reason — which is exactly what happened when
+        the corrective stages were switched on out of the box, and the failure
+        said nothing about the migration it was supposed to be checking.
+    */
+    const auto defaultOf = [&restored](const char* id) {
+        auto* parameter = restored.apvts.getParameter(id);
+        return parameter->convertFrom0to1(parameter->getDefaultValue());
+    };
+    for (const auto* id : { "smartEQAmount", "smartEQRange", "smartEQResponse" })
+        CHECK(std::abs(restored.apvts.getRawParameterValue(id)->load() - defaultOf(id)) < 1.0e-4f);
     CHECK(restored.apvts.getRawParameterValue("pitchKey")->load() == 9.0f);
     restored.getStateInformation(state);
     auto after = juce::AudioProcessor::getXmlFromBinary(state.getData(), static_cast<int>(state.getSize()));
