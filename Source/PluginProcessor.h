@@ -106,11 +106,15 @@ public:
     void unloadInsertPlugin();
     bool hasInsertPlugin() const noexcept { return insertSlot.hasPlugin(); }
     juce::String insertPluginName() const { return insertSlot.pluginName(); }
+    const juce::File& insertPluginFile() const noexcept { return insertSlot.pluginFile(); }
     juce::StringArray insertParameterNames() const { return insertSlot.parameterNames(); }
     juce::String insertParameterText(int index) const { return insertSlot.parameterText(index); }
     float insertParameterValue(int index) const { return insertSlot.getParameter(index); }
     void setInsertParameter(int index, float normalised) { insertSlot.setParameter(index, normalised); }
     int findInsertParameter(const juce::StringArray& words) const { return insertSlot.findParameter(words); }
+    juce::AudioProcessorEditor* createInsertEditor() { return insertSlot.createHostedEditor(); }
+    bool insertHasEditor() const noexcept { return insertSlot.hasHostedEditor(); }
+    static juce::Array<juce::File> installedPluginFolders();
 
     void applyFactoryPreset(int index);
     float smartEQGain(size_t band) const noexcept { return smartEQ.gainDb(band); }

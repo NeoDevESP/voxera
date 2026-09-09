@@ -197,6 +197,10 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
                           "so a session recorded on a different day or at a different distance "
                           "from the microphone still sits with the rest. Click again to forget it.");
     loadModel.onClick = [this] { chooseNeuralModel(); };
+    insertButton.onClick = [this] { chooseInsertPlugin(); };
+    insertButton.setTooltip("Puts one of your own plugins inside this chain, after the dynamics "
+                            "and before the harmonic stages. Auto Mix will set its main control "
+                            "if it can recognise one.");
     loadModel.setTooltip("Loads a Neural Amp Modeler capture (.nam) or an RTNeural model (.json) "
                          "and runs it where a preamp would sit. Captures of microphone preamps and "
                          "console channels are what suit a voice. NAM LSTM and WaveNet up to 12 channels "
@@ -219,7 +223,7 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
         repaint();
     };
     addAndMakeVisible(motion);
-    for (auto* b : {&compareMix, &undoMix, &mixOptions, &matchLevel, &analyze, &autoMix, &learnVoice, &savePreset, &loadPreset, &loadModel,
+    for (auto* b : {&compareMix, &undoMix, &mixOptions, &matchLevel, &analyze, &autoMix, &learnVoice, &savePreset, &loadPreset, &loadModel, &insertButton,
                     &bypass, &lowLatency})
         addAndMakeVisible(b);
     advancedEditor = std::make_unique<juce::GenericAudioProcessorEditor>(processor);
@@ -232,6 +236,14 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
 VoxeraAudioProcessorEditor::~VoxeraAudioProcessorEditor()
 {
     stopTimer(); chooser.reset();
+    /*  The hosted plugin's window goes before anything else.
+
+        It shows an editor belonging to the plugin in the insert slot, and that
+        plugin outlives this editor: closing the DAW's plugin window must not
+        leave a floating window pointing into something whose owner is on its
+        way out.
+    */
+    closeInsertWindow();
     advancedViewport.setViewedComponent(nullptr, false);
     setLookAndFeel(nullptr);
 }
@@ -254,6 +266,7 @@ void VoxeraAudioProcessorEditor::selectPage(int page)
     learnVoice.setVisible(page == 0);
     savePreset.setVisible(page == 2); loadPreset.setVisible(page == 2);
     loadModel.setVisible(page == 2);
+    insertButton.setVisible(page == 2);
     compressorChoice.combo.setVisible(page == 2); compressorChoice.label.setVisible(page == 2);
     advancedViewport.setVisible(page == 3);
     for (int i = 0; i < 6; ++i) tabs[static_cast<size_t>(i)].setToggleState(i == page, juce::dontSendNotification);
@@ -326,7 +339,8 @@ void VoxeraAudioProcessorEditor::resized()
     for (int i = 0; i < VoxeraAudioProcessor::numFactoryPresets; ++i)
         place(presets[static_cast<size_t>(i)], 110 + i * 98, 374, 92, 40);
     place(savePreset, 405, 440, 178, 34); place(loadPreset, 603, 440, 178, 34);
-    place(loadModel, 405, 484, 376, 32);
+    place(loadModel, 405, 484, 184, 32);
+    place(insertButton, 597, 484, 184, 32);
     place(compressorChoice.label, 110, 438, 220, 20);
     place(compressorChoice.combo, 110, 466, 230, 32);
     place(controls[24]->label, 845, 424, 160, 22);
@@ -413,6 +427,134 @@ void VoxeraAudioProcessorEditor::applyNeuralModel(const juce::File& file)
     still there for a file kept somewhere else, and the folder itself can be
     opened straight from here, which is how anything gets into it.
 */
+/*  Everything installed, listed by name, without a scan that looks like a hang.
+
+    Reading the folders is instant; instantiating a plugin to learn its real
+    name is not, and doing that for several hundred of them before showing a
+    menu would leave a person staring at nothing. So the menu shows file names,
+    and the real name arrives on the button once the chosen one has loaded.
+*/
+void VoxeraAudioProcessorEditor::chooseInsertPlugin()
+{
+    juce::Array<juce::File> found;
+    for (const auto& folder : VoxeraAudioProcessor::installedPluginFolders())
+        folder.findChildFiles(found, juce::File::findFilesAndDirectories, false, "*.vst3");
+    found.sort();
+
+    juce::PopupMenu menu;
+    if (found.isEmpty()) {
+        menu.addSectionHeader("No VST3 plugins found in the usual folders");
+    } else {
+        juce::PopupMenu list;
+        for (int i = 0; i < found.size(); ++i)
+            list.addItem(i + 1, found[i].getFileNameWithoutExtension(), true,
+                         found[i] == processor.insertPluginFile());
+        menu.addSubMenu("Installed (" + juce::String(found.size()) + ")", list);
+    }
+    menu.addItem(-1, "Browse for a plugin...");
+    if (processor.hasInsertPlugin()) {
+        menu.addSeparator();
+        menu.addItem(-2, "Open its window");
+        menu.addItem(-3, "Remove it from the chain");
+    }
+
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(insertButton),
+        [safe = juce::Component::SafePointer<VoxeraAudioProcessorEditor>(this), found](int choice) {
+            if (safe == nullptr || choice == 0) return;
+
+            if (choice == -2) { safe->showInsertWindow(); return; }
+            if (choice == -3) {
+                // The window first, then the plugin: it holds a pointer into it.
+                safe->closeInsertWindow();
+                safe->processor.unloadInsertPlugin();
+                safe->insertButton.setButtonText("INSERT PLUGIN");
+                return;
+            }
+
+            const auto load = [safe](const juce::File& file) {
+                if (safe == nullptr) return;
+                safe->closeInsertWindow();
+                const auto result = safe->processor.loadInsertPlugin(file);
+                safe->insertButton.setButtonText(result.ok
+                    ? safe->processor.insertPluginName().toUpperCase() : juce::String("INSERT PLUGIN"));
+                if (!result.ok)
+                    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                        "That plugin did not load", result.message);
+                else
+                    safe->showInsertWindow();
+            };
+
+            if (choice == -1) {
+                safe->chooser = std::make_unique<juce::FileChooser>("Choose a VST3 plugin",
+                    VoxeraAudioProcessor::installedPluginFolders().isEmpty()
+                        ? juce::File() : VoxeraAudioProcessor::installedPluginFolders().getFirst(),
+                    "*.vst3");
+                safe->chooser->launchAsync(juce::FileBrowserComponent::openMode
+                                         | juce::FileBrowserComponent::canSelectFiles
+                                         | juce::FileBrowserComponent::canSelectDirectories,
+                    [load](const juce::FileChooser& fc) {
+                        if (fc.getResult() != juce::File()) load(fc.getResult());
+                    });
+                return;
+            }
+
+            if (juce::isPositiveAndBelow(choice - 1, found.size())) load(found[choice - 1]);
+        });
+}
+
+/*  The hosted plugin's own window.
+
+    Its editor is not ours to resize or restyle, so the window simply takes the
+    size the plugin asks for. Closing it deletes the editor but leaves the
+    plugin loaded and running, which is what a person expects from closing a
+    window rather than removing a device.
+*/
+void VoxeraAudioProcessorEditor::showInsertWindow()
+{
+    if (!processor.hasInsertPlugin()) return;
+    if (insertWindow != nullptr) { insertWindow->toFront(true); return; }
+    if (!processor.insertHasEditor()) {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
+            processor.insertPluginName(),
+            "That plugin has no window of its own. Its controls are still there and Auto Mix "
+            "can still reach them.");
+        return;
+    }
+
+    auto* hosted = processor.createInsertEditor();
+    if (hosted == nullptr) return;
+
+    class HostedWindow : public juce::DocumentWindow
+    {
+    public:
+        HostedWindow(const juce::String& name, VoxeraAudioProcessorEditor& owner)
+            : juce::DocumentWindow(name, juce::Colour(0xff120b12), closeButton), editor(owner) {}
+        // Routed through the owner so the pointer it keeps is cleared too, and
+        // a second click does not try to show a window that is already gone.
+        void closeButtonPressed() override { editor.closeInsertWindow(); }
+    private:
+        VoxeraAudioProcessorEditor& editor;
+    };
+
+    auto window = std::make_unique<HostedWindow>(processor.insertPluginName(), *this);
+    window->setUsingNativeTitleBar(true);
+    window->setContentNonOwned(hosted, true);
+    window->setResizable(hosted->isResizable(), false);
+    window->centreWithSize(hosted->getWidth(), hosted->getHeight());
+    window->setVisible(true);
+    insertWindow = std::move(window);
+}
+
+void VoxeraAudioProcessorEditor::closeInsertWindow()
+{
+    if (insertWindow == nullptr) return;
+    // Detached before the window goes, because the editor belongs to the hosted
+    // plugin and destroying it here would leave that plugin holding a dangling
+    // pointer to its own window.
+    insertWindow->clearContentComponent();
+    insertWindow.reset();
+}
+
 void VoxeraAudioProcessorEditor::chooseNeuralModel()
 {
     juce::PopupMenu menu;

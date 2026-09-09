@@ -65,6 +65,19 @@ private:
     juce::TextButton loadModel { "LOAD NEURAL MODEL" };
     juce::TextButton learnVoice { "LEARN THIS VOICE" };
     void chooseNeuralModel();
+
+    /*  The insert slot: pick a plugin, and open its own window.
+
+        The window is owned here rather than by the slot, because it belongs to
+        this editor's lifetime — and it must be closed before the instance
+        behind it is released, which is why unloading goes through a method
+        that takes it down first.
+    */
+    void chooseInsertPlugin();
+    void showInsertWindow();
+    void closeInsertWindow();
+    juce::TextButton insertButton { "INSERT PLUGIN" };
+    std::unique_ptr<juce::DocumentWindow> insertWindow;
     void applyNeuralModel(const juce::File&);
     juce::TextButton bypass { "BYPASS" };
     juce::TextButton lowLatency { "LOW LATENCY" };

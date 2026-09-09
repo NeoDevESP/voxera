@@ -241,6 +241,28 @@ void VoxeraAudioProcessor::republishLatency()
     dryDelay.setDelay(latency);
 }
 
+/*  Where plugins live on this machine.
+
+    The common folders rather than a scan of the whole disk: a full scan on a
+    system with several hundred plugins takes long enough that people assume it
+    has hung, and the folders below are where the installers put things anyway.
+*/
+juce::Array<juce::File> VoxeraAudioProcessor::installedPluginFolders()
+{
+    juce::Array<juce::File> folders;
+   #if JUCE_WINDOWS
+    folders.add(juce::File("C:/Program Files/Common Files/VST3"));
+    folders.add(juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                    .getChildFile("VST3"));
+   #elif JUCE_MAC
+    folders.add(juce::File("/Library/Audio/Plug-Ins/VST3"));
+    folders.add(juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                    .getChildFile("Library/Audio/Plug-Ins/VST3"));
+   #endif
+    folders.removeIf([](const juce::File& f) { return !f.isDirectory(); });
+    return folders;
+}
+
 voxera::PluginSlot::LoadResult VoxeraAudioProcessor::loadInsertPlugin(const juce::File& file)
 {
     auto result = insertSlot.load(file);

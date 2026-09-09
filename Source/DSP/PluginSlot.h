@@ -124,6 +124,9 @@ public:
 
     void unload()
     {
+        // The plugin's own window holds a pointer into the instance, so it has
+        // to be taken down before the instance is, not after.
+        if (current != nullptr) current->editorBeingDeleted(current->getActiveEditor());
         active.store(nullptr, std::memory_order_release);
         current.reset();
         pending.reset();
@@ -267,6 +270,20 @@ public:
         return findParameter({ "Peak Reduct", "Peak Reduction", "Threshold",
                                "Compression", "Amount", "Input" });
     }
+
+    /*  The hosted plugin's own window, if it has one.
+
+        Handed out rather than owned, because whoever opens it decides when it
+        closes — but the instance behind it is owned here, so the caller has to
+        close it before this slot is unloaded. That contract is the reason
+        unload() below is not simply a reset: the editor has to go first.
+    */
+    juce::AudioProcessorEditor* createHostedEditor()
+    {
+        return current != nullptr && current->hasEditor() ? current->createEditorIfNeeded() : nullptr;
+    }
+
+    bool hasHostedEditor() const noexcept { return current != nullptr && current->hasEditor(); }
 
     void process(juce::AudioBuffer<float>& buffer)
     {
