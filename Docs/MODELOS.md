@@ -15,7 +15,7 @@ La carpeta se crea sola. Deja ahí los archivos y aparecerán en el menú del bo
 | `.nam` | Captura de [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler) |
 | `.json` | Modelo de RTNeural (lo que exportan Keras y las herramientas de Aida-X) |
 
-**Solo arquitectura LSTM.** Los modelos WaveNet se rechazan con un mensaje que lo explica: cuestan del orden de una décima de núcleo cada uno, y la cadena entera de VOXERA funciona en una décima de núcleo. No es una limitación pendiente de arreglar, es una decisión.
+**NAM LSTM y WaveNet de hasta 12 canales por capa.** Los modelos más anchos se rechazan con una explicación. RTNeural necesita una entrada y una salida. El límite de ancho no sustituye medir el consumo del modelo concreto.
 
 ## Qué capturas sirven para una voz
 

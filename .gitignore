@@ -12,3 +12,7 @@ build-insp/
 .env
 secrets.*
 Tools/*.local.ps1
+__pycache__/
+
+# Fixtures que generan las propias pruebas neuronales al ejecutarse.
+voxera-neural-test/

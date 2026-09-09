@@ -25,7 +25,7 @@ jobs:
       - name: Upload installer and checksums
         uses: actions/upload-artifact@v4
         with:
-          name: VOXERA-0.8.0-Windows-x64-Installer
+          name: VOXERA-1.5.0-Windows-x64-Installer
           if-no-files-found: error
           path: dist/
       - name: Upload test evidence

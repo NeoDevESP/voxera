@@ -31,15 +31,25 @@ Escucha ocho segundos y configura la cadena entera. **Y explica por qué**: lee 
 
 `voxera::decide` en `Source/DSP/AutoMix.h` es una función pura del perfil a los ajustes. No es una red neuronal: es un mapeo de reglas, aislado precisamente para poder sustituirse por inferencia de un modelo entrenado sin tocar nada más. Lo que falta para eso no es código sino datos.
 
+En VOCALS, **MIX OPTIONS** ajusta intensidad y bloqueos de afinaci�n, EQ, din�mica y color. **A/B** compara con la configuraci�n anterior y **UNDO MIX** deshace el �ltimo Auto Mix. **MATCH LEVEL** iguala RMS de manera aproximada y limitada; deja unos segundos para que se estabilice.
+
+La captura exige m�s de dos segundos de se�al �til dentro de los ocho de escucha y rechaza una proporci�n de muestras recortadas del 1 % o superior. Los silencios no se incluyen en el balance medido. El informe distingue la propuesta de lo aplicado.
+
+## Compresores y Sauce
+
+En PRESETS puedes elegir **Clean, FET, VCA, Vari-Mu u Opto** y mover **COMP SAUCE**. Son dise�os propios inspirados en familias anal�gicas. La mezcla paralela, filtro del detector y tiempos est�n en MORE. Consulta [ingenier�a de sonido y referencias](Docs/SOUND_ENGINEERING.md).
+
+Los presets restablecen el tratamiento sonoro; conservan tonalidad, escala, motor de afinaci�n, ganancias de entrada/salida, Low Latency, bypass, referencias y opciones de Auto Mix. El modelo neuronal permanece cargado, pero su mezcla vuelve a cero.
+
 ## Modo Low Latency
 
-Saca el afinador de la ruta de señal: **59,3 ms → 4,6 ms**. Todo lo demás sigue funcionando, así que se puede cantar a través del plugin. El detector de tono continúa activo, de modo que el editor sigue mostrando la nota.
+Saca el afinador de la ruta de señal. A 48 kHz la latencia depende del motor seleccionado: PSOLA es el predeterminado y Rubber Band es alternativo; Low Latency conserva solo los retardos de las demás etapas. El editor muestra la cifra activa. El detector de tono continúa funcionando, pero no se aplica corrección de afinación.
 
 ## Etapa neuronal
 
 Carga capturas `.nam` de [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler) y modelos JSON de RTNeural. Aunque NAM apunte a amplificadores de guitarra, el mismo proceso de captura sirve para un previo de micrófono o un canal de consola, que es lo que interesa a una voz.
 
-Solo arquitectura **LSTM**, y es un límite deliberado: los modelos WaveNet cuestan del orden de una décima de núcleo cada uno, y esta cadena entera funciona en una décima de núcleo.
+Admite NAM LSTM y WaveNet con hasta 12 canales por capa, además de modelos RTNeural de una entrada y una salida. Las capturas más anchas se rechazan por coste. El consumo depende del modelo y de la sesión; no se garantiza un número fijo de instancias.
 
 La captura se ejecuta **a la frecuencia a la que fue entrenada**, remuestreando alrededor si la sesión va a otra. El estado de una red recurrente avanza por muestra y no por segundo, así que sin eso todas sus constantes de tiempo se estirarían y la captura dejaría de ser una captura.
 

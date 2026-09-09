@@ -1,4 +1,6 @@
+#ifndef AppVersion
 #define AppVersion "1.5.0"
+#endif
 [Setup]
 ; Its own AppId. Sharing one with either earlier build would make Windows treat
 ; this install as an upgrade of that build and uninstall it, which defeats the
