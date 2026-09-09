@@ -703,7 +703,15 @@ void VoxeraAudioProcessorEditor::drawWorking(juce::Graphics& g, juce::Rectangle<
 
     g.setFont(font(12.0f));
     g.setColour(juce::Colour(0xfff6c0e4));
-    g.drawText(juce::String(db, 1), value.toNearestInt(), juce::Justification::centredRight);
+    /*  Negative zero is still zero, and it should not be shown as "-0.0".
+
+        The reduction meters negate a positive figure for display, so a stage
+        doing nothing produced a minus sign attached to nothing — visible on
+        two of the four meters at rest. Tiny, and exactly the sort of thing
+        that makes a plugin feel unfinished before anyone has heard it.
+    */
+    const float shown = std::abs(db) < 0.05f ? 0.0f : db;
+    g.drawText(juce::String(shown, 1), value.toNearestInt(), juce::Justification::centredRight);
 }
 void VoxeraAudioProcessorEditor::paint(juce::Graphics& g)
 {
