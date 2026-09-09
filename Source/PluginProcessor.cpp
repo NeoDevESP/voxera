@@ -531,7 +531,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxeraAudioProcessor::create
             toggle("autoMixLockEQ", "Keep EQ", false),
             toggle("autoMixLockDynamics", "Keep Dynamics", false),
             toggle("autoMixLockColour", "Keep Colour", false),
-            toggle(ParamIDs::levelMatch, "Level Match (RMS)", false)),
+            /*  On by default, which makes inserting this plugin a change of sound
+                and not a change of level.
+
+                Two reasons, and the second matters more than it looks.
+
+                The corrective work now switched on by default removes energy —
+                clearing the low end of a close-miked home recording takes about
+                three decibels with it — and nobody should have to know that in
+                order to get their balance back.
+
+                And louder is heard as better by everybody, including whoever is
+                deciding whether a setting helped. Holding the output at the
+                level that went in is what makes it possible to judge the
+                processing at all rather than judging the gain.
+            */
+            toggle(ParamIDs::levelMatch, "Level Match (RMS)", true)),
         group("sauce", "Compressor Colour",
             number(ParamIDs::compColour, "Comp Sauce", { 0.0f, 100.0f, 0.1f }, 50.0f)));
 
@@ -1578,17 +1593,17 @@ void VoxeraAudioProcessor::applyFactoryPreset(int index)
     */
     static constexpr float values[numFactoryPresets][numPresetValues] = {
         // tune retune human  tone  air space drive  mix punch excite optic dens clip smrtEQ lock warm comp | mode form dbl width delay verb pres deEss | cmix schpf colour
-        {   35,    30,   70,    0,   1,    8,    2,   8,   20,    15,   25,  35,   5,    20,   55,  20,   2,     0,   0,  10,   50,    5,  40,   1,  55, 100,  60, 15, 2.5,   0 }, // Clean
-        {   55,    40,   60,  -30,  -1,   14,    7,  30,   35,    10,   45,  45,  12,    30,   60,  70,   3,     1,   0,  20,   60,   10,  50,   0,  50,  85,  75, 60, 3.0,   2 }, // Warm
-        {  100,    75,   25,   10,   3,   18,    5,  20,   60,    50,   55,  65,  25,    40,   70,  45,   1,     1,   0,  30,   70,   15,  45,   2,  60,  90,  95, 45, 3.0,   0 }, // Modern
-        {   70,    45,   65,   20,   4,   65,    3,  15,   30,    40,   40,  50,  10,    25,   50,  40,   3,     1,   0,  45,   80,   30,  70,   1,  50,  80,  70, 50, 2.5,   1 }, // Dream
-        {   90,    85,   10,  -55,  -3,   10,   14,  60,   75,    35,   70,  80,  45,    35,   75,  60,   1,     2,   0,  15,   55,    8,  35,   3,  65, 100, 110, 70, 4.0,  -1 }, // Radio
+        {   35,    30,   70,    0,   2,    8,    2,   8,   20,    15,   20,  30,   3,    35,   85,  20,   2,     0,   0,  10,   50,    5,  40,   1,  55, 100,  60, 15, 2.0,  -3 }, // Clean
+        {   55,    40,   60,  -20,   1,   14,    7,  30,   30,    15,   30,  35,   8,    40,   90,  70,   3,     1,   0,  20,   60,   10,  50,   1,  50,  85,  75, 60, 2.5,  -2 }, // Warm
+        {  100,    75,   25,   20,   3,   18,    5,  20,   40,    50,   30,  40,  12,    45,   95,  45,   1,     1,   0,  30,   70,   15,  45,   3,  60,  90,  95, 45, 2.5,  -4 }, // Modern
+        {   70,    45,   65,   25,   4,   65,    3,  15,   25,    40,   25,  35,   6,    35,   85,  40,   3,     1,   0,  45,   80,   30,  70,   2,  50,  80,  70, 50, 2.0,  -3 }, // Dream
+        {   90,    85,   10,  -30,   0,   10,   12,  50,   50,    35,   45,  50,  20,    45,   95,  60,   1,     2,   0,  15,   55,    8,  35,   4,  65, 100, 110, 70, 3.5,  -3 }, // Radio
 
-        {  100,    98,    0,   40,   5,   12,   18,  70,   80,    65,   60,  75,  70,    30,   60,  35,   1,     2,   3,  35,   75,   15,  30,   4,  70,  75, 150, 80, 6.0,  -2 }, // Rage
-        {  100,    90,    5,  -10,   3,   55,   12,  55,   55,    45,   55,  60,  35,    35,   65,  55,   3,     2,  -2,  55,   85,   35,  75,   2,  60,  70, 120, 70, 4.0,  -1 }, // Astro
-        {   85,    60,   30,    0,   3,   45,    6,  30,   40,    40,   50,  55,  15,    35,   60,  60,   3,     1,   0,  40,   75,   28,  65,   2,  55,  85,  90, 55, 3.0,   1 }, // Melodic
-        {   60,    70,   25,   15,   2,   10,   10,  40,   70,    40,   55,  60,  30,    40,   70,  40,   1,     1,   0,  15,   45,    8,  25,   3,  65,  65, 140, 65, 5.0,  -2 }, // Drill
-        {  100,    95,    0,   25,   5,   80,   14,  60,   45,    60,   45,  65,  45,    25,   50,  45,   1,     2,   5,  70,  100,   50,  85,   3,  60,  60, 130, 75, 4.0,  -3 }, // Ad-Lib
+        {  100,    98,    0,   45,   5,   12,   16,  60,   55,    65,   40,  50,  35,    40,   90,  35,   1,     2,   3,  35,   75,   15,  30,   5,  70,  75, 150, 80, 4.5,  -4 }, // Rage
+        {  100,    90,    5,    5,   3,   55,   10,  45,   40,    45,   35,  40,  18,    45,   95,  55,   3,     2,  -2,  55,   85,   35,  75,   3,  60,  70, 120, 70, 3.0,  -4 }, // Astro
+        {   85,    60,   30,   10,   3,   45,    6,  30,   30,    40,   30,  35,   8,    45,   90,  60,   3,     1,   0,  40,   75,   28,  65,   3,  55,  85,  90, 55, 2.5,  -3 }, // Melodic
+        {   60,    70,   25,   25,   2,   10,   10,  40,   50,    40,   35,  40,  15,    45,   95,  40,   1,     1,   0,  15,   45,    8,  25,   4,  65,  65, 140, 65, 3.5,  -4 }, // Drill
+        {  100,    95,    0,   30,   5,   80,   12,  50,   35,    60,   30,  45,  22,    35,   85,  45,   1,     2,   5,  70,  100,   50,  85,   4,  60,  60, 130, 75, 3.0,  -5 }, // Ad-Lib
 
         /*  Clarity: measured against a finished commercial vocal rather than
             chosen by ear, and it is the one preset here that does LESS.
