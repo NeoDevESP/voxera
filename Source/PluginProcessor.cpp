@@ -225,7 +225,7 @@ juce::Array<juce::File> VoxeraAudioProcessor::availableNeuralModels()
     in the insert slot. It reallocates the dry delay, so it belongs on the
     message thread with audio suspended and nowhere else.
 */
-void VoxeraAudioProcessor::republishLatency()
+void VoxeraAudioProcessor::republishLatency(bool announceNow)
 {
     const int fixedLatency = baseFixedLatency + insertSlot.getLatencySamples();
     fullLatencySamples = fixedLatency + pitchEngine.getLatencySamples();
@@ -233,12 +233,33 @@ void VoxeraAudioProcessor::republishLatency()
 
     const int latency = shifterBypassed ? trackingLatencySamples : fullLatencySamples;
     activeLatencySamples.store(latency);
-    setLatencySamples(latency);
 
     // Sized for the longest any combination of engine and mode can need, so
     // that every switch afterwards only moves an offset rather than allocating.
     dryDelay.prepare(getTotalNumOutputChannels(), fixedLatency + widestPitchLatency);
     dryDelay.setDelay(latency);
+
+    /*  Announced straight away during preparation, and handed to the async
+        updater at any other time.
+
+        Inside prepareToPlay a host is asking for the figure and expects the
+        answer before the call returns, so deferring it there simply reports the
+        wrong number until something else happens to trigger an update — which
+        is what broke the impulse-alignment test the first time this was made
+        asynchronous everywhere.
+
+        Outside it, announcing is what makes a host stop and restart the plugin,
+        and some do that immediately and synchronously. From a menu callback in
+        our own editor, that means the host tears the editor down while the
+        callback is still running inside it. The deferral exists for that case,
+        and the mechanism was already here for the tracking-mode switch.
+    */
+    if (announceNow) {
+        setLatencySamples(latency);
+    } else {
+        latencyChangePending.store(true);
+        triggerAsyncUpdate();
+    }
 }
 
 /*  Where plugins live on this machine.
@@ -585,7 +606,7 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     widestPitchLatency = juce::jmax(rubberBandLatency, psolaLatency);
 
     pitchEngine.setShifterBypassed(shifterBypassed);
-    republishLatency();
+    republishLatency(true);
     dryBuffer.setSize(getTotalNumOutputChannels(), preparedBlockSize);
     globalWet.reset(sampleRate, 0.020);
     globalWet.setCurrentAndTargetValue(prm.bypass->load() > 0.5f

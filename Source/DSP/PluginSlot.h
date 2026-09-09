@@ -45,10 +45,12 @@ public:
         capacity = juce::jmax(1, maximumBlockSize);
         numChannels = juce::jlimit(1, 2, channels);
 
-        if (current != nullptr) prepareHosted(*current);
         mix.reset(sr, 0.050);
         mix.setCurrentAndTargetValue(mix.getTargetValue());
         scratch.setSize(juce::jmax(2, numChannels), capacity, false, true, true);
+        // After the scratch exists, and sized from what the plugin asks for
+        // rather than from our own channel count.
+        if (current != nullptr) { prepareHosted(*current); sizeScratch(*current); }
     }
 
     void reset()
@@ -102,6 +104,10 @@ public:
         }
 
         prepareHosted(*instance);
+        if (instance->getTotalNumOutputChannels() < 1) {
+            result.message = "That plugin would not give a usable output bus.";
+            return result;
+        }
         pending = std::move(instance);
         pendingName = found.getFirst()->name;
         pendingFile = file;
@@ -115,8 +121,17 @@ public:
     // Called with audio stopped, so the previous instance is safe to release.
     void commitLoad()
     {
+        /*  The scratch buffer is resized here and not while loading.
+
+            It is the buffer the audio thread reads every block, so growing it
+            reallocates memory that thread may be inside. Loading happens with
+            audio running — deliberately, since instantiating a licensed plugin
+            can take seconds and suspending across that would stall the session
+            — which makes this the only safe place for it.
+        */
         active.store(pending.get(), std::memory_order_release);
         current = std::move(pending);
+        if (current != nullptr) sizeScratch(*current);
         loadedName = pendingName;
         loadedFile = pendingFile;
         hostedLatency = current != nullptr ? current->getLatencySamples() : 0;
@@ -124,9 +139,14 @@ public:
 
     void unload()
     {
-        // The plugin's own window holds a pointer into the instance, so it has
-        // to be taken down before the instance is, not after.
-        if (current != nullptr) current->editorBeingDeleted(current->getActiveEditor());
+        /*  The instance is simply released.
+
+            An earlier version called editorBeingDeleted here, which is not what
+            that function is for: it is how an editor tells its processor that
+            it is going away, not how a processor disposes of one. Whoever
+            opened the window is the one that has to close it, and the editor
+            in this project does exactly that before calling here.
+        */
         active.store(nullptr, std::memory_order_release);
         current.reset();
         pending.reset();
@@ -299,39 +319,104 @@ public:
         */
         const int wide = juce::jmax(1, juce::jmax(hosted->getTotalNumInputChannels(),
                                                   hosted->getTotalNumOutputChannels()));
-        if (scratch.getNumChannels() < wide || scratch.getNumSamples() < count) { mix.skip(count); return; }
+        if (scratch.getNumChannels() < wide) { mix.skip(count); return; }
 
-        for (int ch = 0; ch < wide; ++ch)
-            scratch.copyFrom(ch, 0, buffer, juce::jmin(ch, channels - 1), 0, count);
+        /*  Never handed more samples at once than it was prepared for.
 
-        juce::AudioBuffer<float> view(scratch.getArrayOfWritePointers(), wide, 0, count);
-        /*  A MIDI buffer it can write into, kept as a member and emptied each
-            time rather than made here. Clearing a MidiBuffer keeps the storage
-            it already has, so this costs nothing on the audio thread, while a
-            local one would allocate on the first plugin that sends anything.
+            A plugin allocates its buffers in prepareToPlay from the block size
+            it was given, and a host is entitled to send a longer block than it
+            promised. Passing that straight through is how a hosted plugin
+            writes past the end of its own storage, and the crash lands on
+            whoever is hosting rather than on whoever wrote it.
         */
-        hostedMidi.clear();
-        hosted->processBlock(view, hostedMidi);
+        const int slice = juce::jmax(1, juce::jmin(capacity, scratch.getNumSamples()));
 
-        for (int i = 0; i < count; ++i) {
-            const float wet = mix.getNextValue();
-            for (int ch = 0; ch < channels; ++ch) {
-                const float processed = scratch.getSample(juce::jmin(ch, wide - 1), i);
-                auto& sample = buffer.getWritePointer(ch)[i];
-                // Guarded, because what came back is not code this project wrote,
-                // and a stage downstream should not have to cope with a value
-                // that is not a number.
-                sample += wet * ((std::isfinite(processed) ? processed : sample) - sample);
+        for (int at = 0; at < count; at += slice)
+        {
+            const int piece = juce::jmin(slice, count - at);
+
+            for (int ch = 0; ch < wide; ++ch)
+                scratch.copyFrom(ch, 0, buffer, juce::jmin(ch, channels - 1), at, piece);
+
+            juce::AudioBuffer<float> view(scratch.getArrayOfWritePointers(), wide, 0, piece);
+            /*  A MIDI buffer it can write into, kept as a member and emptied
+                each time rather than made here. Clearing a MidiBuffer keeps the
+                storage it already has, so this costs nothing on the audio
+                thread, while a local one would allocate on the first plugin
+                that sends anything.
+            */
+            hostedMidi.clear();
+            hosted->processBlock(view, hostedMidi);
+
+            for (int i = 0; i < piece; ++i) {
+                const float wet = mix.getNextValue();
+                for (int ch = 0; ch < channels; ++ch) {
+                    const float processed = scratch.getSample(juce::jmin(ch, wide - 1), i);
+                    auto& sample = buffer.getWritePointer(ch)[at + i];
+                    // Guarded, because what came back is not code this project
+                    // wrote, and a stage downstream should not have to cope with
+                    // a value that is not a number.
+                    sample += wet * ((std::isfinite(processed) ? processed : sample) - sample);
+                }
             }
         }
     }
 
 private:
+    /*  Asks the hosted plugin for a plain main bus and nothing else.
+
+        This was the fault behind both of the symptoms this class first shipped
+        with. Almost every compressor worth inserting has a sidechain input, so
+        taking whatever bus layout the plugin happened to default to meant its
+        channel count came back as four rather than two — and then the guard in
+        process() found a scratch buffer too narrow and quietly declined to run
+        it at all. A compressor that loads, reports its latency, appears in the
+        interface and does nothing to the sound.
+
+        Left unconfigured it is also a crash waiting to happen, because a plugin
+        told it has four channels will read and write four, and the buffer handed
+        to it has two.
+
+        So the extra buses are switched off explicitly and the main one is asked
+        for stereo, then mono. If the plugin will accept neither, that is worth
+        knowing at load time rather than discovering as silence.
+    */
+    static bool configureBuses(juce::AudioPluginInstance& instance, int wanted)
+    {
+        auto layout = instance.getBusesLayout();
+
+        for (int i = 1; i < layout.inputBuses.size(); ++i)
+            layout.inputBuses.getReference(i) = juce::AudioChannelSet::disabled();
+        for (int i = 1; i < layout.outputBuses.size(); ++i)
+            layout.outputBuses.getReference(i) = juce::AudioChannelSet::disabled();
+
+        for (const auto& set : { wanted >= 2 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono(),
+                                 juce::AudioChannelSet::stereo(),
+                                 juce::AudioChannelSet::mono() })
+        {
+            if (!layout.inputBuses.isEmpty())  layout.inputBuses.getReference(0) = set;
+            if (!layout.outputBuses.isEmpty()) layout.outputBuses.getReference(0) = set;
+            if (instance.setBusesLayout(layout)) return true;
+        }
+        return false;
+    }
+
     void prepareHosted(juce::AudioPluginInstance& instance)
     {
+        configureBuses(instance, numChannels);
         instance.setPlayConfigDetails(instance.getTotalNumInputChannels(),
                                       instance.getTotalNumOutputChannels(), sr, capacity);
         instance.prepareToPlay(sr, capacity);
+        instance.setNonRealtime(false);
+    }
+
+    // Wide enough for whatever the hosted plugin ended up wanting, worked out
+    // once at load rather than assumed to be two.
+    void sizeScratch(const juce::AudioPluginInstance& instance)
+    {
+        const int wide = juce::jmax(2, instance.getTotalNumInputChannels(),
+                                       instance.getTotalNumOutputChannels());
+        scratch.setSize(wide, juce::jmax(capacity, scratch.getNumSamples()), false, true, true);
     }
 
     juce::AudioPluginFormatManager formats;

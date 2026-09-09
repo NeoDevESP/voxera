@@ -277,7 +277,8 @@ private:
     int fullLatencySamples = 0, trackingLatencySamples = 0;
     // The parts the figure is rebuilt from when the insert slot changes.
     int baseFixedLatency = 0, widestPitchLatency = 0;
-    void republishLatency();
+    // announceNow: synchronous inside prepareToPlay, deferred anywhere else.
+    void republishLatency(bool announceNow = false);
     std::atomic<int> activeLatencySamples { 0 };
     std::atomic<bool> latencyChangePending { false };
     bool shifterBypassed = false;
