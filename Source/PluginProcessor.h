@@ -44,7 +44,7 @@ public:
         says they endorsed it, which is a different claim entirely and not
         one that is ours to make.
     */
-    static constexpr int numFactoryPresets = 10;
+    static constexpr int numFactoryPresets = 11;
     // Bumped whenever parameters are added, so an older saved state is known to
     // need the missing-parameter pass in setStateInformation.
     // 4: density, vocal lock, warmth, reverb tone, chop, crush, modulation and

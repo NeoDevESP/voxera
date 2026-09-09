@@ -655,9 +655,9 @@ int main(int argc, char** argv)
             // Depends on which capture the user loaded, if any.
             "neuralMix",
             // Fine adjustment underneath a macro that the presets do drive.
-            "compThreshold", "compRatio", "compAttack", "compRelease",
+            "compThreshold", "compAttack", "compRelease",
             "smartEQRange", "smartEQResponse", "gateThreshold", "limiterCeiling",
-            "targetDb", "autoGain", "bodyDb", "clean", "reverbAir", "duck",
+            "targetDb", "autoGain", "clean", "reverbAir", "duck",
             "delayFeedback", "character",
             // Musical divisions and shapes: a preset picking one for everybody
             // would be a worse default than leaving it where the user put it.
