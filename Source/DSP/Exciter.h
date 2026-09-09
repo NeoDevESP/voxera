@@ -114,13 +114,40 @@ public:
     }
 
 private:
-    static constexpr double splitHz = 3500.0;    // bottom of the band that is squared
-    static constexpr double bandTopHz = 8000.0;  // 2x this must stay under Nyquist
-    static constexpr double liftHz = 7000.0;     // keeps only what the squaring created
+    /*  The band this feeds on, lowered to where a real voice keeps something.
+
+        These sat at 3.5-8 kHz, which is where an exciter belongs on a source
+        that has content there. A close-miked home recording does not: measured
+        on one, the whole region above 4 kHz held about one per cent of the
+        energy, so squaring it produced nothing and the control appeared broken.
+        It was not — fed a strong 4 kHz tone it moved the top band from 14 to 39
+        per cent — it simply had nothing to multiply.
+
+        An exciter cannot invent content; it can only make harmonics of what is
+        already there. So it now feeds on 2-6 kHz, which is the top of where a
+        dull vocal still has real signal, and keeps what the squaring puts above
+        4 kHz. That is the band a home recording is missing, generated from the
+        band it actually has.
+    */
+    static constexpr double splitHz = 2000.0;    // bottom of the band that is squared
+    static constexpr double bandTopHz = 6000.0;  // 2x this must stay under Nyquist
+    static constexpr double liftHz = 4000.0;     // keeps only what the squaring created
     static constexpr double releaseSeconds = 0.030;
     static constexpr double broadbandSeconds = 0.020;
     static constexpr float envelopeFloor = 1.0e-6f;
-    static constexpr float drive = 0.5f;
+    /*  Set by measurement, on a real voice, not by what looked reasonable.
+
+        At the value this used to hold, turning the control from nothing to
+        maximum added 0.16 dB above 4 kHz — which is not a subtle effect, it is
+        no effect, and it is why the exciter was reported as broken. The stage
+        was working the whole time; it was simply inaudible.
+
+        Measured on a home recording, at the maximum setting: 0.5 gave 0.16 dB,
+        2.0 gave 1.4, 6.0 gives 5.8 and 12.0 gives 10.0. Six is the point where
+        the control has somewhere to travel without the top of its range being
+        a setting nobody would use.
+    */
+    static constexpr float drive = 6.0f;
     /*  Where the band starts to dominate the whole signal, and over how much
         further it takes the generation all the way down.
 

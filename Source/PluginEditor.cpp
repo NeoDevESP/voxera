@@ -149,6 +149,22 @@ VoxeraAudioProcessorEditor::VoxeraAudioProcessorEditor(VoxeraAudioProcessor& p)
     addControl("compRelease", "RELEASE", 2);
     addControl("optical", "OPTO LEVEL", 2);
     addControl("density", "DENSITY", 2);
+
+    /*  Three controls that the chain has and the interface did not.
+
+        Every parameter is reachable through the generic ADVANCED list, so
+        nothing here was unreachable — but a list of seventy names is where a
+        control goes to be never found. The exciter is the clearest case: it is
+        the stage that makes a voice sound open rather than merely bright, and
+        somebody looking for it on the page called "colour" concluded it did
+        not work.
+
+        Added at the end deliberately. The grid below places controls by index,
+        so inserting anywhere else would silently move every knob after it.
+    */
+    addControl("exciter", "EXCITER", 1);
+    addControl("satWarmth", "WARMTH", 1);
+    addControl("punch", "PUNCH", 2);
     const char* tabNames[] = {"VOCALS", "FX", "DYNAMICS", "ADVANCED", "SMART EQ", "CHOP"};
     for (int i = 0; i < 6; ++i) {
         auto& tab = tabs[static_cast<size_t>(i)];
@@ -318,7 +334,10 @@ void VoxeraAudioProcessorEditor::resized()
         place(c.slider, 326+column*width, 300+row*146, width-20, 110);
     };
     for (int i=0; i<3; ++i) { knob(5+i,i,0); knob(25+i,i,1); }
-    for (int i=0; i<6; ++i) knob(8+i,i%3,i/3);
+    // FX in four columns rather than three, which is what makes room for the
+    // exciter and the warmth control without a third row crowding the meters.
+    for (int i=0; i<6; ++i) knob(8+i,i%4,i/4,4);
+    knob(34,2,1,4); knob(35,3,1,4);
     for (int i=0; i<3; ++i) knob(14+i,i,1);
     for (int i=0; i<3; ++i) {
         auto& c=choices[size_t(3+i)];
@@ -330,6 +349,7 @@ void VoxeraAudioProcessorEditor::resized()
     place(loadModel,588,208,260,36); place(insertButton,868,208,274,36);
     knob(24,0,0,4);
     for (int i=0; i<6; ++i) knob(28+i,(i+1)%4,(i+1)/4,4);
+    knob(36,3,1,4);
     place(analyze,326,206,240,38); place(learnVoice,588,206,240,38);
     place(advancedViewport,320,186,832,376);
     advancedEditor->setSize(advancedViewport.getWidth()-18, advancedViewport.getHeight());

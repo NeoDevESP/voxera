@@ -271,7 +271,15 @@ void checkExciter()
             juce::AudioBuffer<float> b(2, length), reference(2, length);
             for (int ch = 0; ch < 2; ++ch)
                 for (int i = 0; i < length; ++i) {
-                    const float inBand = sine(6000.0, i, sr, 0.20f);
+                    /*  Well inside the band the stage feeds on, which moved
+                        when that band did. Six kilohertz sat comfortably inside
+                        the old 3.5-8 kHz and sits on the corner of the present
+                        2-6 kHz, where the filter has already taken 3 dB off it
+                        and the guard has correspondingly less to tell apart.
+                        The probe belongs in the middle of whatever band is
+                        being tested, not at a frequency that was once central.
+                    */
+                    const float inBand = sine(3500.0, i, sr, 0.20f);
                     // Identical in the band; the vowel simply has a fundamental
                     // underneath it and the sibilant has nothing.
                     const float v = sibilant ? inBand : sine(180.0, i, sr, 0.35f) + inBand;
