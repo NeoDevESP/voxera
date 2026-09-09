@@ -84,6 +84,8 @@ int main(int argc, char** argv)
 
     juce::File output;
     juce::String preset;
+    bool autoMix = false;
+    juce::String insert;
     juce::StringPairArray overrides;
 
     for (int i = 2; i < argc; ++i) {
@@ -91,12 +93,15 @@ int main(int argc, char** argv)
         if (argument == "--out" && i + 1 < argc)
             output = juce::File::getCurrentWorkingDirectory().getChildFile(argv[++i]);
         else if (argument == "--preset" && i + 1 < argc) preset = argv[++i];
+        else if (argument == "--auto-mix") autoMix = true;
+        else if (argument == "--insert" && i + 1 < argc) insert = argv[++i];
         else if (argument == "--set" && i + 1 < argc) {
             const juce::String pair(argv[++i]);
             overrides.set(pair.upToFirstOccurrenceOf("=", false, false),
                           pair.fromFirstOccurrenceOf("=", false, false));
         }
     }
+    if (output == input) { std::cerr << "Output must differ from the original recording\n"; return 1; }
 
     juce::AudioFormatManager formats;
     formats.registerBasicFormats();
@@ -124,6 +129,32 @@ int main(int argc, char** argv)
 
     constexpr int block = 128;
     processor.prepareToPlay(rate, block);
+
+    /*  A plugin of somebody else's, in the insert slot.
+
+        Loaded here rather than assumed to work: hosting is the one feature in
+        this chain whose success depends on code nobody here wrote, so the only
+        honest way to find out whether a given plugin loads is to load it.
+    */
+    if (insert.isNotEmpty()) {
+        const juce::File file(insert);
+        const auto loaded = processor.loadInsertPlugin(file);
+        std::cout << "  insert: " << file.getFileName() << " -> " << loaded.message << std::endl;
+        if (!loaded.ok) return 3;
+    }
+    if (autoMix) {
+        processor.requestAutoMix();
+        juce::MidiBuffer captureMidi;
+        for (int at = 0; at < length; at += block) {
+            const int count = juce::jmin(block, length - at);
+            juce::AudioBuffer<float> capture(channels, count);
+            for (int ch = 0; ch < channels; ++ch) capture.copyFrom(ch, 0, dry, ch, at, count);
+            processor.processBlock(capture, captureMidi);
+        }
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
+        std::cout << processor.autoMixReport() << "\n";
+        processor.releaseResources(); processor.prepareToPlay(rate, block);
+    }
     const int latency = processor.getLatencySamples();
 
     /*  The tail is rendered as well as the take.

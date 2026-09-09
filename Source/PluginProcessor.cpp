@@ -213,6 +213,60 @@ juce::Array<juce::File> VoxeraAudioProcessor::availableNeuralModels()
     return found;
 }
 
+/*  Loads a plugin into the insert slot. Message thread only.
+
+    The latency is republished afterwards because the hosted plugin brings its
+    own, and a host that is not told about it lines every other track up against
+    a figure this plugin no longer has.
+*/
+/*  Works the latency out again and tells everyone who needs to know.
+
+    Called after anything that changes it, which now includes a plugin arriving
+    in the insert slot. It reallocates the dry delay, so it belongs on the
+    message thread with audio suspended and nowhere else.
+*/
+void VoxeraAudioProcessor::republishLatency()
+{
+    const int fixedLatency = baseFixedLatency + insertSlot.getLatencySamples();
+    fullLatencySamples = fixedLatency + pitchEngine.getLatencySamples();
+    trackingLatencySamples = fixedLatency;
+
+    const int latency = shifterBypassed ? trackingLatencySamples : fullLatencySamples;
+    activeLatencySamples.store(latency);
+    setLatencySamples(latency);
+
+    // Sized for the longest any combination of engine and mode can need, so
+    // that every switch afterwards only moves an offset rather than allocating.
+    dryDelay.prepare(getTotalNumOutputChannels(), fixedLatency + widestPitchLatency);
+    dryDelay.setDelay(latency);
+}
+
+voxera::PluginSlot::LoadResult VoxeraAudioProcessor::loadInsertPlugin(const juce::File& file)
+{
+    auto result = insertSlot.load(file);
+    if (!result.ok) return result;
+
+    const double session = getSampleRate() > 0.0 ? getSampleRate() : 48000.0;
+
+    suspendProcessing(true);
+    insertSlot.commitLoad();
+    insertSlot.prepare(session, preparedBlockSize, getTotalNumOutputChannels());
+    suspendProcessing(false);
+
+    republishLatency();
+    if (result.latencySamples > 0)
+        result.message += " (adds " + juce::String(result.latencySamples) + " samples of latency)";
+    return result;
+}
+
+void VoxeraAudioProcessor::unloadInsertPlugin()
+{
+    suspendProcessing(true);
+    insertSlot.unload();
+    suspendProcessing(false);
+    republishLatency();
+}
+
 voxera::NeuralStage::LoadResult VoxeraAudioProcessor::loadNeuralModel(const juce::File& file)
 {
     auto result = neural.load(file);
@@ -449,6 +503,7 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     smartEQ.prepare(sampleRate, getTotalNumOutputChannels());
 
     compressor.prepare(sampleRate, getTotalNumOutputChannels());
+    insertSlot.prepare(sampleRate, samplesPerBlock, getTotalNumOutputChannels());
     compressor.reset();
 
     gate.prepare(sampleRate, getTotalNumOutputChannels());
@@ -502,19 +557,13 @@ void VoxeraAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     selectedEngine = engineFromParameter();
     pitchEngine.setEngine(selectedEngine);
 
-    fullLatencySamples = fixedLatency + pitchEngine.getLatencySamples();
-    trackingLatencySamples = fixedLatency;
-    const int widestLatency = fixedLatency + juce::jmax(rubberBandLatency, psolaLatency);
+    // Kept, so that loading a plugin into the insert slot later can work the
+    // figures out again without repeating the whole of this function.
+    baseFixedLatency = fixedLatency;
+    widestPitchLatency = juce::jmax(rubberBandLatency, psolaLatency);
 
     pitchEngine.setShifterBypassed(shifterBypassed);
-    const int latency = shifterBypassed ? trackingLatencySamples : fullLatencySamples;
-    activeLatencySamples.store(latency);
-    setLatencySamples(latency);
-
-    // Allocated for the longest any combination of engine and mode can need, so
-    // that every switch afterwards only moves an offset.
-    dryDelay.prepare(getTotalNumOutputChannels(), widestLatency);
-    dryDelay.setDelay(latency);
+    republishLatency();
     dryBuffer.setSize(getTotalNumOutputChannels(), preparedBlockSize);
     globalWet.reset(sampleRate, 0.020);
     globalWet.setCurrentAndTargetValue(prm.bypass->load() > 0.5f
@@ -861,6 +910,17 @@ void VoxeraAudioProcessor::processChunk(juce::AudioBuffer<float>& buffer, bool h
     punch.setAmount(prm.punch->load() * 0.01f);
     punch.process(buffer);
 
+    /*  The insert slot, where a compressor of your own would go.
+
+        After our dynamics and before the harmonic stages, which is the position
+        a colour box occupies on a real chain: the level is already under
+        control, so what goes here is being asked for its character rather than
+        for gain reduction, and everything downstream hears the result.
+
+    */
+    insertSlot.setMix(1.0f);
+    insertSlot.process(buffer);
+
     /*  Tone and character, after every dynamics stage and before any harmonic
         one — the position they occupy on a professional vocal chain, and for a
         reason rather than by convention.
@@ -1050,6 +1110,26 @@ void VoxeraAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     if (loadedNeuralFile.existsAsFile())
         state.setProperty("neuralModel", loadedNeuralFile.getFullPathName(), nullptr);
 
+    /*  The insert plugin: where it lives, and everything it was set to.
+
+        Both, because either alone is useless. The path without the settings
+        reopens the session with the right compressor at its factory defaults,
+        which looks like it worked and is not what anybody left. The settings
+        without the path have nothing to apply them to.
+
+        Its state is stored as the plugin handed it over, encoded only so it
+        survives being written into XML. What is inside belongs to whoever wrote
+        that plugin and is not ours to interpret.
+    */
+    state.removeProperty("insertPlugin", nullptr);
+    state.removeProperty("insertState", nullptr);
+    if (insertSlot.pluginFile().exists()) {
+        state.setProperty("insertPlugin", insertSlot.pluginFile().getFullPathName(), nullptr);
+        const auto hosted = insertSlot.getHostedState();
+        if (hosted.getSize() > 0)
+            state.setProperty("insertState", hosted.toBase64Encoding(), nullptr);
+    }
+
     /*  The voice reference travels with the session. It is eight numbers, and
         without it the Voice Match control would be a knob that does nothing
         every time a project is reopened — which is worse than not having it.
@@ -1138,6 +1218,24 @@ void VoxeraAudioProcessor::setStateInformation(const void* data, int sizeInBytes
         if (const auto path = state.getProperty("neuralModel").toString(); path.isNotEmpty()) {
             const auto result = loadNeuralModel(juce::File(path));
             if (!result.ok) lastReport = "Neural model unavailable: " + path + ". Choose the file again in PRESETS.";
+        }
+
+        /*  The insert plugin, then its settings, in that order.
+
+            Said plainly when it cannot be found rather than passed over: a
+            session that was mixed through somebody's compressor and reopens
+            without it does not sound the same, and the person deserves to be
+            told which plugin is missing instead of wondering why.
+        */
+        if (const auto path = state.getProperty("insertPlugin").toString(); path.isNotEmpty()) {
+            const auto result = loadInsertPlugin(juce::File(path));
+            if (result.ok) {
+                juce::MemoryBlock hosted;
+                if (hosted.fromBase64Encoding(state.getProperty("insertState").toString()))
+                    insertSlot.setHostedState(hosted);
+            } else {
+                lastReport = "Insert plugin unavailable: " + path + ". " + result.message;
+            }
         }
 
         apvts.replaceState(state);

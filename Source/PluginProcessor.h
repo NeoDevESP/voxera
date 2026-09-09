@@ -23,6 +23,7 @@
 #include "DSP/Modulation.h"
 #include "DSP/NeuralStage.h"
 #include "DSP/ColourCompressor.h"
+#include "DSP/PluginSlot.h"
 #include "DSP/VoiceMatch.h"
 #include "DSP/SoftClip.h"
 #include "DSP/Character.h"
@@ -94,6 +95,17 @@ public:
     float voiceMatchRangeDb() const noexcept { return voiceMatch.appliedRangeDb(); }
     void clearVoiceReference() { pendingReference.publish({}); publishedReference.publish({}); referenceReady.store(false); }
     bool isAutoMixPending() const noexcept { return autoMixRequested.load(); }
+
+    /*  The insert slot: somebody else's compressor or EQ, inside this chain.
+
+        Loading suspends audio, because the pointer the audio thread follows has
+        to stop being read before the instance behind it is destroyed, and
+        because instantiating a licensed plugin can take seconds.
+    */
+    voxera::PluginSlot::LoadResult loadInsertPlugin(const juce::File& file);
+    void unloadInsertPlugin();
+    bool hasInsertPlugin() const noexcept { return insertSlot.hasPlugin(); }
+    juce::String insertPluginName() const { return insertSlot.pluginName(); }
 
     void applyFactoryPreset(int index);
     float smartEQGain(size_t band) const noexcept { return smartEQ.gainDb(band); }
@@ -254,6 +266,9 @@ private:
     // prepareToPlay; the dry delay is allocated for the larger of the two so
     // switching between them never allocates on the audio thread.
     int fullLatencySamples = 0, trackingLatencySamples = 0;
+    // The parts the figure is rebuilt from when the insert slot changes.
+    int baseFixedLatency = 0, widestPitchLatency = 0;
+    void republishLatency();
     std::atomic<int> activeLatencySamples { 0 };
     std::atomic<bool> latencyChangePending { false };
     bool shifterBypassed = false;
@@ -303,6 +318,7 @@ private:
     AdaptiveSpectralEngine spectralEngine;
     SmartEQ smartEQ;
     voxera::ColourCompressor compressor;
+    voxera::PluginSlot insertSlot;
     Saturator saturator;
     SpatialEngine spatialEngine;
     VoiceProfileEngine voiceProfile;

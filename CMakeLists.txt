@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.24)
 
 project(VOXERA VERSION 1.5.0 LANGUAGES C CXX)
 
@@ -213,6 +213,14 @@ target_compile_definitions(VOXERA
         # everywhere else would otherwise convert every sample twice per block
         # for no audible return.
         NAM_SAMPLE_FLOAT=1
+# Hosting other people's plugins, so a favourite compressor or EQ can sit
+        # inside this chain instead of beside it.
+        #
+        # JUCE bundles the VST3 SDK, so this needs no new dependency. It does
+        # need a word about distribution: shipping a VST3 HOST commercially is
+        # a separate agreement with Steinberg from shipping a VST3 plugin, and
+        # that is a signature rather than a code change.
+        JUCE_PLUGINHOST_VST3=1
         VOXERA_WITH_INSPECTOR=$<BOOL:${VOXERA_UI_INSPECTOR}>
 )
 
@@ -247,6 +255,11 @@ target_link_libraries(VOXERA
 option(VOXERA_BUILD_TESTS "Build VOXERA regression tests" OFF)
 if(VOXERA_BUILD_TESTS)
     enable_testing()
+    add_executable(VOXERA_ReviewTests Tests/review_tests.cpp)
+    target_include_directories(VOXERA_ReviewTests PRIVATE Tests/headers ${rubberband_SOURCE_DIR})
+    target_compile_definitions(VOXERA_ReviewTests PRIVATE JucePlugin_Name="VOXERA" NAM_SAMPLE_FLOAT=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_link_libraries(VOXERA_ReviewTests PRIVATE VOXERA RTNeural juce::juce_audio_utils juce::juce_dsp)
+    add_test(NAME review_regressions COMMAND VOXERA_ReviewTests)
     add_executable(VOXERA_AlgorithmTests Tests/algorithm_tests.cpp)
     add_executable(VOXERA_RealtimeTests Tests/realtime_tests.cpp)
     add_test(NAME pitch_control COMMAND VOXERA_AlgorithmTests)
@@ -260,7 +273,7 @@ if(VOXERA_BUILD_TESTS)
     # answer what the chain does to a voice.
     add_executable(VOXERA_Render Tools/Render.cpp)
     target_include_directories(VOXERA_Render PRIVATE Tests/headers ${rubberband_SOURCE_DIR})
-    target_compile_definitions(VOXERA_Render PRIVATE JucePlugin_Name="VOXERA" NAM_SAMPLE_FLOAT=1)
+    target_compile_definitions(VOXERA_Render PRIVATE JucePlugin_Name="VOXERA" NAM_SAMPLE_FLOAT=1 JUCE_MODAL_LOOPS_PERMITTED=1)
     target_link_libraries(VOXERA_Render PRIVATE VOXERA RTNeural juce::juce_audio_utils juce::juce_dsp)
 
     add_executable(VOXERA_DetectorBenchmark Tests/detector_benchmark.cpp)
